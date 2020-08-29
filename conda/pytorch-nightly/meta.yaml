@@ -1,5 +1,5 @@
 package:
-  name: pytorch-nightly{{ environ.get('PYTORCH_PACKAGE_SUFFIX') }}
+  name: pytorch
   version: "{{ environ.get('PYTORCH_BUILD_VERSION') }}"
 
 source:
@@ -15,19 +15,21 @@ requirements:
     - numpy 1.11.*
     - setuptools
     - pyyaml
-    - cffi
-    - mkl >=2018
+    - mkl >=2019
     - mkl-include
-    - typing
+    - typing_extensions
     - ninja
+    - libuv # [unix]
+    - pkg-config # [unix]
 {{ environ.get('MAGMA_PACKAGE') }}
 
   run:
     - python
     - numpy >=1.11
     - mkl >=2018
-    - cffi
     - ninja
+    - typing_extensions
+    - blas * mkl
 {{ environ.get('CONDA_CUDATOOLKIT_CONSTRAINT') }}
 
 build:
@@ -38,13 +40,16 @@ build:
     - CUDA_VERSION
     - CUDNN_VERSION
     - CONDA_CUDATOOLKIT_CONSTRAINT
-    - NO_CUDA
+    - USE_CUDA
     - CMAKE_ARGS
     - EXTRA_CAFFE2_CMAKE_FLAGS
     - DEVELOPER_DIR
     - DEBUG
-    - NO_FBGEMM
+    - USE_FBGEMM
     - USE_SCCACHE # [win]
+    - USE_DISTRIBUTED # [unix]
+  features:
+{{ environ.get('CONDA_CPU_ONLY_FEATURE') }}
 
 test:
  imports:

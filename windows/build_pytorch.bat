@@ -3,11 +3,11 @@
 :: This script parses args, installs required libraries (miniconda, MKL,
 :: Magma), and then delegates to cpu.bat, cuda80.bat, etc.
 
-IF NOT "%CUDA_VERSION%" == "" IF NOT "%PYTORCH_BUILD_VERSION%" == "" if NOT "%PYTORCH_BUILD_NUMBER%" == "" goto env_end
+if not "%CUDA_VERSION%" == "" if not "%PYTORCH_BUILD_VERSION%" == "" if not "%PYTORCH_BUILD_NUMBER%" == "" goto env_end
 if "%~1"=="" goto arg_error
 if "%~2"=="" goto arg_error
 if "%~3"=="" goto arg_error
-if NOT "%~4"=="" goto arg_error
+if not "%~4"=="" goto arg_error
 goto arg_end
 
 :arg_error
@@ -25,13 +25,13 @@ set PYTORCH_BUILD_NUMBER=%~3
 
 :env_end
 
-if NOT "%CUDA_VERSION%" == "cpu" (
+if not "%CUDA_VERSION%" == "cpu" (
     set CUDA_PREFIX=cuda%CUDA_VERSION%
 ) else (
     set CUDA_PREFIX=cpu
 )
 
-IF "%DESIRED_PYTHON%" == "" set DESIRED_PYTHON=3.5;3.6;3.7
+if "%DESIRED_PYTHON%" == "" set DESIRED_PYTHON=3.5;3.6;3.7
 set DESIRED_PYTHON_PREFIX=%DESIRED_PYTHON:.=%
 set DESIRED_PYTHON_PREFIX=py%DESIRED_PYTHON_PREFIX:;=;py%
 
@@ -44,9 +44,9 @@ set "tmp_conda=%CONDA_HOME%"
 set "miniconda_exe=%CD%\miniconda.exe"
 rmdir /s /q conda
 del miniconda.exe
-curl -k https://repo.continuum.io/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "%miniconda_exe%"
+curl -k https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "%miniconda_exe%"
 call ..\conda\install_conda.bat
-IF ERRORLEVEL 1 exit /b 1
+if ERRORLEVEL 1 exit /b 1
 set "ORIG_PATH=%PATH%"
 set "PATH=%CONDA_HOME%;%CONDA_HOME%\scripts;%CONDA_HOME%\Library\bin;%PATH%"
 
@@ -56,61 +56,95 @@ FOR %%v IN (%DESIRED_PYTHON%) DO (
     set PYTHON_VERSION_STR=%%v
     set PYTHON_VERSION_STR=!PYTHON_VERSION_STR:.=!
     conda remove -n py!PYTHON_VERSION_STR! --all -y || rmdir %CONDA_HOME%\envs\py!PYTHON_VERSION_STR! /s
-    conda create -n py!PYTHON_VERSION_STR! -y -q numpy>=1.11 mkl>=2018 cffi pyyaml boto3 cmake ninja typing python=%%v
+    if "%%v" == "3.6" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" cffi pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3.7" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" cffi pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3.8" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" pyyaml boto3 cmake ninja typing_extensions python=%%v
 )
 endlocal
 
 :: Install MKL
 rmdir /s /q mkl
-del mkl_2018.2.185.7z
-curl https://s3.amazonaws.com/ossci-windows/mkl_2018.2.185.7z -k -O
-7z x -aoa mkl_2018.2.185.7z -omkl
-set CMAKE_INCLUDE_PATH=%cd%\\mkl\\include
-set LIB=%cd%\\mkl\\lib;%LIB%
+del mkl_2019.4.245.7z
+curl https://s3.amazonaws.com/ossci-windows/mkl_2020.0.166.7z -k -O
+7z x -aoa mkl_2020.0.166.7z -omkl
+set CMAKE_INCLUDE_PATH=%cd%\mkl\include
+set LIB=%cd%\mkl\lib;%LIB%
 
 :: Download MAGMA Files on CUDA builds
-if NOT "%CUDA_VERSION%" == "cpu" (
-    rmdir /s /q magma_%CUDA_PREFIX%_release
-    del magma_%CUDA_PREFIX%_release.7z
-    curl -k https://s3.amazonaws.com/ossci-windows/magma_2.4.0_%CUDA_PREFIX%_release.7z -o magma_%CUDA_PREFIX%_release.7z
-    7z x -aoa magma_%CUDA_PREFIX%_release.7z -omagma_%CUDA_PREFIX%_release
+set MAGMA_VERSION=2.5.3
+if "%CUDA_VERSION%" == "92" set MAGMA_VERSION=2.5.2
+if "%CUDA_VERSION%" == "100" set MAGMA_VERSION=2.5.2
+
+if "%DEBUG%" == "1" (
+    set BUILD_TYPE=debug
+) else (
+    set BUILD_TYPE=release
+)
+
+if not "%CUDA_VERSION%" == "cpu" (
+    rmdir /s /q magma_%CUDA_PREFIX%_%BUILD_TYPE%
+    del magma_%CUDA_PREFIX%_%BUILD_TYPE%.7z
+    curl -k https://s3.amazonaws.com/ossci-windows/magma_%MAGMA_VERSION%_%CUDA_PREFIX%_%BUILD_TYPE%.7z -o magma_%CUDA_PREFIX%_%BUILD_TYPE%.7z
+    7z x -aoa magma_%CUDA_PREFIX%_%BUILD_TYPE%.7z -omagma_%CUDA_PREFIX%_%BUILD_TYPE%
 )
 
 :: Install sccache
 if "%USE_SCCACHE%" == "1" (
-    mkdir %CD%\\tmp_bin
-    curl -k https://s3.amazonaws.com/ossci-windows/sccache.exe --output %CD%\\tmp_bin\\sccache.exe
-    if NOT "%CUDA_VERSION%" == "" (
-        copy %CD%\\tmp_bin\\sccache.exe %CD%\\tmp_bin\\nvcc.exe
+    mkdir %CD%\tmp_bin
+    curl -k https://s3.amazonaws.com/ossci-windows/sccache.exe --output %CD%\tmp_bin\sccache.exe
+    curl -k https://s3.amazonaws.com/ossci-windows/sccache-cl.exe --output %CD%\tmp_bin\sccache-cl.exe
+    if not "%CUDA_VERSION%" == "" (
+        copy %CD%\tmp_bin\sccache.exe %CD%\tmp_bin\nvcc.exe
 
-        set CUDA_NVCC_EXECUTABLE=%CD%\\tmp_bin\\nvcc
-        set "PATH=%CD%\\tmp_bin;%PATH%"
+        set CUDA_NVCC_EXECUTABLE=%CD%\tmp_bin\nvcc
+        set ADDITIONAL_PATH=%CD%\tmp_bin
+        set SCCACHE_IDLE_TIMEOUT=1500
+
+        :: randomtemp is used to resolve the intermittent build error related to CUDA.
+        :: code: https://github.com/peterjc123/randomtemp
+        :: issue: https://github.com/pytorch/pytorch/issues/25393
+        ::
+        :: Previously, CMake uses CUDA_NVCC_EXECUTABLE for finding nvcc and then
+        :: the calls are redirected to sccache. sccache looks for the actual nvcc
+        :: in PATH, and then pass the arguments to it.
+        :: Currently, randomtemp is placed before sccache (%TMP_DIR_WIN%\bin\nvcc)
+        :: so we are actually pretending sccache instead of nvcc itself.
+        curl -kL https://github.com/peterjc123/randomtemp/releases/download/v0.3/randomtemp.exe --output %CD%\tmp_bin\randomtemp.exe
+        set RANDOMTEMP_EXECUTABLE=%CD%\tmp_bin\nvcc.exe
+        set CUDA_NVCC_EXECUTABLE=%CD%\tmp_bin\randomtemp.exe
+        set RANDOMTEMP_BASEDIR=%CD%\tmp_bin
     )
 )
 
 set PYTORCH_BINARY_BUILD=1
 set TH_BINARY_BUILD=1
+set INSTALL_TEST=0
 
 for %%v in (%DESIRED_PYTHON_PREFIX%) do (
     :: Activate Python Environment
     set PYTHON_PREFIX=%%v
     set "CONDA_LIB_PATH=%CONDA_HOME%\envs\%%v\Library\bin"
-    set "PATH=%CONDA_HOME%\envs\%%v;%CONDA_HOME%\envs\%%v\scripts;%CONDA_HOME%\envs\%%v\Library\bin;%ORIG_PATH%"
+    if not "%ADDITIONAL_PATH%" == "" (
+        set "PATH=%ADDITIONAL_PATH%;%CONDA_HOME%\envs\%%v;%CONDA_HOME%\envs\%%v\scripts;%CONDA_HOME%\envs\%%v\Library\bin;%ORIG_PATH%"
+    ) else (
+        set "PATH=%CONDA_HOME%\envs\%%v;%CONDA_HOME%\envs\%%v\scripts;%CONDA_HOME%\envs\%%v\Library\bin;%ORIG_PATH%"
+    )
     pip install ninja
     @setlocal
     :: Set Flags
-    if NOT "%CUDA_VERSION%"=="cpu" (
-        set MAGMA_HOME=%cd%\\magma_%CUDA_PREFIX%_release
+    if not "%CUDA_VERSION%"=="cpu" (
+        set MAGMA_HOME=%cd%\magma_%CUDA_PREFIX%_%BUILD_TYPE%
         set CUDNN_VERSION=7
     )
     call %CUDA_PREFIX%.bat
-    IF ERRORLEVEL 1 exit /b 1
-    IF "%BUILD_PYTHONLESS%" == "" call internal\test.bat
-    IF ERRORLEVEL 1 exit /b 1
+    if ERRORLEVEL 1 exit /b 1
+    if "%BUILD_PYTHONLESS%" == "" call internal\test.bat
+    if ERRORLEVEL 1 exit /b 1
     @endlocal
 )
 
 set "PATH=%ORIG_PATH%"
 popd
 
-IF ERRORLEVEL 1 exit /b 1
+if ERRORLEVEL 1 exit /b 1

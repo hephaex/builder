@@ -9,36 +9,35 @@
 ## build base docker image
 
 ```
-nvidia-docker build -t soumith/conda-cuda -f Dockerfile .
+cd ..
+nvidia-docker build -t soumith/conda-cuda -f conda/Dockerfile .
 docker push soumith/conda-cuda
 ```
 
 ## building pytorch / torchvision etc.
 
 ```
-nvidia-docker run -it --ipc=host --rm -v $(pwd):/remote soumith/conda-cuda bash
+docker run -it --ipc=host --rm -v $(pwd):/remote pytorch/conda-cuda bash
+
 cd remote/conda
+
+# versioned
 export PYTORCH_FINAL_PACKAGE_DIR="/remote"
-export TORCH_CONDA_BUILD_FOLDER=pytorch-1.0.1
+export TORCH_CONDA_BUILD_FOLDER=pytorch-1.1.0
 export PYTORCH_REPO=pytorch
-export PYTORCH_BRANCH=v1.0.1
-./build_pytorch.sh 100 1.0.1 1 # cuda 10.0 pytorch 1.0.1 build_number 1
-./build_vision.sh
+export PYTORCH_BRANCH=v1.1.0
+./build_pytorch.sh 100 1.1.0 1 # cuda 10.0 pytorch 1.0.1 build_number 1
+
+# nightly
+export PYTORCH_FINAL_PACKAGE_DIR="/remote"
+export TORCH_CONDA_BUILD_FOLDER=pytorch-nightly
+export PYTORCH_REPO=pytorch
+export PYTORCH_BRANCH=master
+./build_pytorch.sh 100 nightly 1 # cuda 10.0 pytorch 1.0.1 build_number 1
+
 ```
 
 
-## building magma-cuda91
+## building magma
 
-```
-nvidia-docker run -it --ipc=host --rm -v $(pwd):/remote soumith/conda-cuda bash
-yum install -y yum-utils centos-release-scl
-yum-config-manager --enable rhel-server-rhscl-7-rpms
-yum install -y devtoolset-3-gcc devtoolset-3-gcc-c++ devtoolset-3-gcc-gfortran devtoolset-3-binutils
-export PATH=/opt/rh/devtoolset-3/root/usr/bin:$PATH
-export LD_LIBRARY_PATH=/opt/rh/devtoolset-3/root/usr/lib64:/opt/rh/devtoolset-3/root/usr/lib:$LD_LIBRARY_PATH
-git clone https://github.com/pytorch/builder
-cd builder/conda
-conda install -y conda-build
-. ./switch_cuda_version.sh 10.0
-conda build magma-cuda100-2.5.0
-```
+> MOVED TO [magma/README.md](../magma/README.md)

@@ -7,11 +7,13 @@ IF NOT "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     exit /b 1
 )
 
-where /q cmake.exe
+IF "%BUILD_VISION%" == "" (
+    where /q cmake.exe
 
-IF ERRORLEVEL 1 (
-    echo CMake is required to compile PyTorch on Windows
-    exit /b 1
+    IF ERRORLEVEL 1 (
+        echo CMake is required to compile PyTorch on Windows
+        exit /b 1
+    )
 )
 
 IF NOT EXIST "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" (
@@ -19,7 +21,16 @@ IF NOT EXIST "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
     exit /b 1
 )
 
-for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -legacy -products * -version [15^,16^) -property installationPath`) do (
+IF "%VC_YEAR%" == "" set VC_YEAR=2019
+
+set VC_VERSION_LOWER=16
+set VC_VERSION_UPPER=17
+IF "%VC_YEAR%" == "2017" (
+    set VC_VERSION_LOWER=15
+    set VC_VERSION_UPPER=16
+)
+
+for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -legacy -products * -version [%VC_VERSION_LOWER%^,%VC_VERSION_UPPER%^) -property installationPath`) do (
     if exist "%%i" if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
         set "VS15INSTALLDIR=%%i"
         set "VS15VCVARSALL=%%i\VC\Auxiliary\Build\vcvarsall.bat"
@@ -29,7 +40,7 @@ for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio
 
 :vswhere
 IF "%VS15VCVARSALL%"=="" (
-    echo Visual Studio 2017 C++ BuildTools is required to compile PyTorch on Windows
+    echo Visual Studio %VC_YEAR% C++ BuildTools is required to compile PyTorch on Windows
     exit /b 1
 )
 

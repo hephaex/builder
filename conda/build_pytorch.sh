@@ -54,6 +54,10 @@ if [[ "$desired_cuda" != cpu ]]; then
 fi
 echo "Building cuda version $desired_cuda and pytorch version: $build_version build_number: $build_number"
 
+if [[ "$OSTYPE" == "msys" && "$CIRCLECI" == 'true' ]]; then
+    export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.:$PATH"
+fi
+
 # Version: setup.py uses $PYTORCH_BUILD_VERSION.post$PYTORCH_BUILD_NUMBER if
 # PYTORCH_BUILD_NUMBER > 1
 if [[ -n "$OVERRIDE_PACKAGE_VERSION" ]]; then
@@ -92,7 +96,7 @@ if [[ -z "$DESIRED_PYTHON" ]]; then
     if [[ "$OSTYPE" == "msys" ]]; then
         DESIRED_PYTHON=('3.5' '3.6' '3.7')
     else
-        DESIRED_PYTHON=('2.7' '3.5' '3.6' '3.7')
+        DESIRED_PYTHON=('2.7' '3.5' '3.6' '3.7' '3.8')
     fi
 fi
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -106,13 +110,21 @@ else
     cuda_nodot="$desired_cuda"
 
     if [[ ${#cuda_nodot} -eq 2 ]]; then
-	desired_cuda="${desired_cuda:0:1}.${desired_cuda:1:1}"
+        desired_cuda="${desired_cuda:0:1}.${desired_cuda:1:1}"
     elif [[ ${#cuda_nodot} -eq 3 ]]; then
-	desired_cuda="${desired_cuda:0:2}.${desired_cuda:2:1}"
+        desired_cuda="${desired_cuda:0:2}.${desired_cuda:2:1}"
     else
-	echo "unknown cuda version $cuda_nodot"
-	exit 1
+        echo "unknown cuda version $cuda_nodot"
+        exit 1
     fi
+fi
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # Produce macOS builds with torch.distributed support.
+    # This is enabled by default on Linux, but disabled by default on macOS,
+    # because it requires an non-bundled compile-time dependency (libuv
+    # through gloo). This dependency is made available through meta.yaml, so
+    # we can override the default and set USE_DISTRIBUTED=1.
+    export USE_DISTRIBUTED=1
 fi
 
 echo "Will build for all Pythons: ${DESIRED_PYTHON[@]}"
@@ -123,7 +135,7 @@ SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 if [[ -z "$MAC_PACKAGE_WORK_DIR" ]]; then
     MAC_PACKAGE_WORK_DIR="$(pwd)/tmp_conda_${DESIRED_PYTHON}_$(date +%H%M%S)"
 fi
-if [[ -z "$WIN_PACKAGE_WORK_DIR" ]]; then
+if [[ "$OSTYPE" == "msys" && -z "$WIN_PACKAGE_WORK_DIR" ]]; then
     WIN_PACKAGE_WORK_DIR="$(echo $(pwd -W) | tr '/' '\\')\\tmp_conda_${DESIRED_PYTHON}_$(date +%H%M%S)"
 fi
 
@@ -138,7 +150,7 @@ elif [[ "$OSTYPE" == "msys" ]]; then
     git config --system core.longpaths true
     # The jobs are seperated on Windows, so we don't need to clone again.
     if [[ -d "$NIGHTLIES_PYTORCH_ROOT" ]]; then
-        cp -R "$NIGHTLIES_PYTORCH_ROOT" "$WIN_PACKAGE_WORK_DIR"
+        cp -R "$NIGHTLIES_PYTORCH_ROOT" "$pytorch_rootdir"
     fi
 elif [[ -d '/pytorch' ]]; then
     # All docker binary builds
@@ -156,6 +168,8 @@ if [[ ! -d "$pytorch_rootdir" ]]; then
 fi
 pushd "$pytorch_rootdir"
 git submodule update --init --recursive
+echo "Using Pytorch from "
+git --no-pager log --max-count 1
 popd
 
 # Windows builds need to install conda
@@ -164,7 +178,7 @@ if [[ "$(uname)" == 'Darwin' ]]; then
     miniconda_sh="${MAC_PACKAGE_WORK_DIR}/miniconda.sh"
     rm -rf "$tmp_conda"
     rm -f "$miniconda_sh"
-    retry curl -sS https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh -o "$miniconda_sh"
+    retry curl -sS https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh -o "$miniconda_sh"
     chmod +x "$miniconda_sh" && \
         "$miniconda_sh" -b -p "$tmp_conda" && \
         rm "$miniconda_sh"
@@ -175,13 +189,11 @@ elif [[ "$OSTYPE" == "msys" ]]; then
     export miniconda_exe="${WIN_PACKAGE_WORK_DIR}\\miniconda.exe"
     rm -rf "$tmp_conda"
     rm -f "$miniconda_exe"
-    curl -sSk https://repo.continuum.io/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "$miniconda_exe"
+    curl -sSk https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "$miniconda_exe"
     "$SOURCE_DIR/install_conda.bat" && rm "$miniconda_exe"
     pushd $tmp_conda
     export PATH="$(pwd):$(pwd)/Library/usr/bin:$(pwd)/Library/bin:$(pwd)/Scripts:$(pwd)/bin:$PATH"
     popd
-    # We have to skip 3.17 because of the following bug.
-    # https://github.com/conda/conda-build/issues/3285
     retry conda install -yq conda-build
 fi
 
@@ -212,7 +224,7 @@ echo "Using conda-build folder $build_folder"
 ###########################################################
 build_string_suffix="$PYTORCH_BUILD_NUMBER"
 if [[ -n "$cpu_only" ]]; then
-    export NO_CUDA=1
+    export USE_CUDA=0
     export CONDA_CUDATOOLKIT_CONSTRAINT=""
     export MAGMA_PACKAGE=""
     export CUDA_VERSION="0.0"
@@ -220,32 +232,40 @@ if [[ -n "$cpu_only" ]]; then
     if [[ "$OSTYPE" != "darwin"* ]]; then
         build_string_suffix="cpu_${build_string_suffix}"
     fi
-    # on Linux, rename the package pytorch-nightly-cpu, because it's cpu build
-    if [[ "$(uname)" != 'Darwin' ]]; then
-	export PYTORCH_PACKAGE_SUFFIX="-cpu" # used in name: pytorch part of meta.yaml
-    else
-	export PYTORCH_PACKAGE_SUFFIX=""
-    fi
+    # on Linux, advertise that the package sets the cpuonly feature
+    export CONDA_CPU_ONLY_FEATURE="    - cpuonly # [not osx]"
 else
     # Switch the CUDA version that /usr/local/cuda points to. This script also
     # sets CUDA_VERSION and CUDNN_VERSION
-    export PYTORCH_PACKAGE_SUFFIX="" # no -cpu suffix because it's regular cuda build
     echo "Switching to CUDA version $desired_cuda"
+    export CONDA_CPU_ONLY_FEATURE=""
     . ./switch_cuda_version.sh "$desired_cuda"
     # TODO, simplify after anaconda fixes their cudatoolkit versioning inconsistency.
     # see: https://github.com/conda-forge/conda-forge.github.io/issues/687#issuecomment-460086164
-    if [[ "$desired_cuda" == "10.0" ]]; then
-	export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=10.0,<10.1 # [not osx]"
-	export MAGMA_PACKAGE="    - magma-cuda100 # [not osx and not win]"
+    if [[ "$desired_cuda" == "11.0" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=11.0,<11.1 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda110 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "10.2" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=10.2,<10.3 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda102 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "10.1" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=10.1,<10.2 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda101 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "10.0" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=10.0,<10.1 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda100 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "9.2" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=9.2,<9.3 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda92 # [not osx and not win]"
     elif [[ "$desired_cuda" == "9.0" ]]; then
-	export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=9.0,<9.1 # [not osx]"
-	export MAGMA_PACKAGE="    - magma-cuda90 # [not osx and not win]"
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=9.0,<9.1 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda90 # [not osx and not win]"
     elif [[ "$desired_cuda" == "8.0" ]]; then
-	export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=8.0,<8.1 # [not osx]"
-	export MAGMA_PACKAGE="    - magma-cuda80 # [not osx and not win]"
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=8.0,<8.1 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda80 # [not osx and not win]"
     else
-	echo "unhandled desired_cuda: $desired_cuda"
-	exit 1
+        echo "unhandled desired_cuda: $desired_cuda"
+        exit 1
     fi
 
     build_string_suffix="cuda${CUDA_VERSION}_cudnn${CUDNN_VERSION}_${build_string_suffix}"
@@ -254,6 +274,18 @@ else
         EXTRA_CAFFE2_CMAKE_FLAGS+=("-DATEN_NO_TEST=ON")
     fi
 
+fi
+
+# Some tricks for sccache with conda builds on Windows
+if [[ "$OSTYPE" == "msys" && "$USE_SCCACHE" == "1" ]]; then
+    if [[ ! -d "/c/cb" ]]; then
+        rm -rf /c/cb
+    fi
+    mkdir -p /c/cb/pytorch_1000000000000
+    export CONDA_BLD_PATH="C:\\cb"
+    export CONDA_BUILD_EXTRA_ARGS="--dirty"
+else
+    export CONDA_BUILD_EXTRA_ARGS=""
 fi
 
 # Loop through all Python versions to build a package for each
@@ -270,11 +302,15 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
 
     # We need to build the compiler activation scripts first on Windows
     if [[ "$OSTYPE" == "msys" ]]; then
+        vs_package="vs$VC_YEAR"
+
         time VSDEVCMD_ARGS=${VSDEVCMD_ARGS[@]} \
              conda build -c "$ANACONDA_USER" \
                          --no-anaconda-upload \
                          --output-folder "$output_folder" \
-                         vs2017
+                         $vs_package
+
+        cp "$vs_package/conda_build_config.yaml" "pytorch-nightly/conda_build_config.yaml"
     fi
 
     # Output the meta.yaml for easy debugging
@@ -294,7 +330,7 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
                      --no-anaconda-upload \
                      --python "$py_ver" \
                      --output-folder "$output_folder" \
-                     --no-test \
+                     --no-test $CONDA_BUILD_EXTRA_ARGS \
                      "$build_folder"
     echo "Finished conda-build at $(date)"
 
@@ -333,6 +369,12 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
     rm -rf "$output_folder"
 done
 
+# Cleanup the tricks for sccache with conda builds on Windows
+if [[ "$OSTYPE" == "msys" ]]; then
+    rm -rf /c/cb/pytorch_1000000000000
+    unset CONDA_BLD_PATH
+fi
+unset CONDA_BUILD_EXTRA_ARGS
+
 unset PYTORCH_BUILD_VERSION
 unset PYTORCH_BUILD_NUMBER
-

@@ -2,20 +2,20 @@
 
 :: The conda and wheels jobs are seperated on Windows, so we don't need to clone again.
 if exist "%NIGHTLIES_PYTORCH_ROOT%" (
-    xcopy /E /Y /Q "%NIGHTLIES_PYTORCH_ROOT%" pytorch\
+    xcopy /E /Y /Q /H "%NIGHTLIES_PYTORCH_ROOT%" pytorch\
     cd pytorch
-    goto submodule
 )
+if exist "%NIGHTLIES_PYTORCH_ROOT%" goto submodule
 
-git clone https://github.com/%PYTORCH_REPO%/pytorch
+git clone https://github.com/%PYTORCH_REPO%/%MODULE_NAME%
 
-cd pytorch
+cd %MODULE_NAME%
 
-IF "%PYTORCH_BRANCH%" == "latest" ( goto latest_start ) else ( goto latest_end )
+IF NOT "%PYTORCH_BRANCH%" == "latest" goto latest_end
 
 :latest_start
 
-if "%NIGHTLIES_DATE%" == "" ( goto date_start ) else ( goto date_end )
+if NOT "%NIGHTLIES_DATE%" == "" goto date_end
 
 :date_start
 
@@ -40,11 +40,9 @@ set PYTORCH_BRANCH=%last_commit%
 
 :latest_end
 
-IF "%PYTORCH_BRANCH%" == "" (
-    set PYTORCH_BRANCH=v%PYTORCH_BUILD_VERSION%
-)
-git checkout tags/%PYTORCH_BRANCH%
-IF ERRORLEVEL 1 git checkout %PYTORCH_BRANCH%
+IF "%PYTORCH_BRANCH%" == "" set PYTORCH_BRANCH=v%PYTORCH_BUILD_VERSION%
+git checkout %PYTORCH_BRANCH%
+IF ERRORLEVEL 1 git checkout tags/%PYTORCH_BRANCH%
 
 :submodule
 

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eux -o pipefail
 
 # Essentially runs pytorch/test/run_test.py, but keeps track of which tests to
 # skip in a centralized place.
@@ -6,8 +7,6 @@
 # TODO Except for a few tests, this entire file is a giant TODO. Why are these
 # tests # failing?
 # TODO deal with Windows
-
-set -ex
 
 # This script expects to be in the pytorch root folder
 if [[ ! -d 'test' || ! -f 'test/run_test.py' ]]; then
@@ -17,12 +16,12 @@ if [[ ! -d 'test' || ! -f 'test/run_test.py' ]]; then
 fi
 
 # Allow master skip of all tests
-if [[ -n "$SKIP_ALL_TESTS" ]]; then
+if [[ -n "${SKIP_ALL_TESTS:-}" ]]; then
     exit 0
 fi
 
 # If given specific test params then just run those
-if [[ -n "$RUN_TEST_PARAMS" ]]; then
+if [[ -n "${RUN_TEST_PARAMS:-}" ]]; then
     echo "$(date) :: Calling user-command $(pwd)/test/run_test.py ${RUN_TEST_PARAMS[@]}"
     python test/run_test.py ${RUN_TEST_PARAMS[@]}
     exit 0
@@ -36,7 +35,7 @@ retry () {
 # Parameters
 ##############################################################################
 if [[ "$#" != 3 ]]; then
-  if [[ -z "$DESIRED_PYTHON" || -z "$DESIRED_CUDA" || -z "$PACKAGE_TYPE" ]]; then
+  if [[ -z "${DESIRED_PYTHON:-}" || -z "${DESIRED_CUDA:-}" || -z "${PACKAGE_TYPE:-}" ]]; then
     echo "USAGE: run_tests.sh  PACKAGE_TYPE  DESIRED_PYTHON  DESIRED_CUDA"
     echo "The env variable PACKAGE_TYPE must be set to 'conda' or 'manywheel' or 'libtorch'"
     echo "The env variable DESIRED_PYTHON must be set like '2.7mu' or '3.6m' etc"
@@ -62,18 +61,36 @@ fi
 
 # Environment initialization
 if [[ "$package_type" == conda || "$(uname)" == Darwin ]]; then
-    retry conda install -yq cffi future hypothesis mkl>=2018 ninja numpy>=1.11 protobuf pytest setuptools six typing
+    # Warning: if you've already manually installed the built conda package
+    # your environment is probably inconsistent (because most of the packages
+    # have a feature requirement).  If we post-facto install the feature,
+    # that will make the environment consistent again.
     if [[ "$cuda_ver" != 'cpu' ]]; then
-	retry conda install -yq cudatoolkit=$cuda_ver_majmin
+        # Windows CUDA 9.2 packages is not available in the defaults channel.
+        retry conda install -yq -c defaults -c numba/label/dev cudatoolkit=$cuda_ver_majmin
+    else
+        # We DON'T want to install cpuonly, because it should not be
+        # necessary for OS X PyTorch which is always cpu only by default
+        if [[ "$(uname)" != Darwin  ]]; then
+            retry conda install -yq cpuonly -c pytorch
+        fi
     fi
+    if [[ "$(python --version 2>&1)" == *3.8.* ]]; then
+        retry conda install -yq future hypothesis mkl>=2018 ninja numpy>=1.15 protobuf pytest setuptools six typing_extensions pyyaml
+    else
+        retry conda install -yq cffi future hypothesis mkl>=2018 ninja numpy>=1.11 protobuf pytest setuptools six typing_extensions pyyaml requests
+    fi
+
 else
     retry pip install -qr requirements.txt || true
     retry pip install -q hypothesis protobuf pytest setuptools || true
-    if [[ "$(python --version 2>&1)" == *3.7.* ]]; then
-        retry pip install -q numpy==1.15 || true
-    else
-        retry pip install -q numpy==1.11 || ture
-    fi
+    numpy_ver=1.15
+    case "$(python --version 2>&1)" in
+      *2* | *3.5* | *3.6*)
+        numpy_ver=1.11
+        ;;
+    esac
+    retry pip install -q "numpy==${numpy_ver}" || true
 fi
 
 echo "Testing with:"
@@ -83,6 +100,7 @@ conda list || true
 ##############################################################################
 # Smoke tests
 ##############################################################################
+# TODO use check_binary.sh, which requires making sure it runs on Windows
 pushd /
 echo "Smoke testing imports"
 python -c 'import torch'
@@ -104,6 +122,15 @@ if [[ "$OSTYPE" == "msys" ]]; then
     fi
 fi
 
+# Test that the version number is consistent during building and testing
+if [[ "$PYTORCH_BUILD_NUMBER" -gt 1 ]]; then
+    expected_version="${PYTORCH_BUILD_VERSION}.post${PYTORCH_BUILD_NUMBER}"
+else
+    expected_version="${PYTORCH_BUILD_VERSION}"
+fi
+echo "Checking that we are testing the package that is just built"
+python -c "import torch; exit(0 if torch.__version__ == '$expected_version' else 1)"
+
 # Test that CUDA builds are setup correctly
 if [[ "$cuda_ver" != 'cpu' ]]; then
     # Test CUDA archs
@@ -120,7 +147,7 @@ fi
 # Check that OpenBlas is not linked to on Macs
 if [[ "$(uname)" == 'Darwin' ]]; then
     echo "Checking the OpenBLAS is not linked to"
-    all_dylibs=($(find "$(python -c 'from setuptools import distutils; print(distutils.sysconfig.get_python_lib())')"/torch -name '*.dylib'))
+    all_dylibs=($(find "$(python -c "import site; print(site.getsitepackages()[0])")"/torch -name '*.dylib'))
     for dylib in "${all_dylibs[@]}"; do
         if [[ -n "$(otool -L $dylib | grep -i openblas)" ]]; then
             echo "Found openblas as a dependency of $dylib"
@@ -254,7 +281,7 @@ if [[ "$cuda_ver" != 'cpu' ]]; then
     #   File "<frozen importlib._bootstrap_external>", line 938, in create_module
     #   File "<frozen importlib._bootstrap>", line 222, in _call_with_frames_removed
     # ImportError: libcudnn.so.7: cannot open shared object file: No such file or directory
-		tests_to_skip+=('TestCppExtension and test_jit_cudnn_extension')
+    tests_to_skip+=('TestCppExtension and test_jit_cudnn_extension')
 
     #
     # TestCuda
@@ -313,41 +340,41 @@ if [[ "$cuda_ver" != 'cpu' ]]; then
     # AssertionError: 1605632 not less than or equal to 1e-05 : __main__.TestEndToEndHybridFrontendModels.test_vae_cuda leaked 1605632 bytes CUDA memory on device 0
     tests_to_skip+=('TestEndToEndHybridFrontendModels and test_vae_cuda')
 
-		# ________________________ TestNN.test_embedding_bag_cuda ________________________
-		# 
-		# self = <test_nn.TestNN testMethod=test_embedding_bag_cuda>
-		# dtype = torch.float32
-		# 
-		#     @unittest.skipIf(not TEST_CUDA, "CUDA unavailable")
-		#     @repeat_test_for_types(ALL_TENSORTYPES)
-		#     @skipIfRocm
-		#     def test_embedding_bag_cuda(self, dtype=torch.float):
-		#         self._test_EmbeddingBag(True, 'sum', False, dtype)
-		#         self._test_EmbeddingBag(True, 'mean', False, dtype)
-		#         self._test_EmbeddingBag(True, 'max', False, dtype)
-		#         if dtype != torch.half:
-		#             # torch.cuda.sparse.HalfTensor is not enabled.
-		#             self._test_EmbeddingBag(True, 'sum', True, dtype)
-		# >           self._test_EmbeddingBag(True, 'mean', True, dtype)
-		# 
-		# test_nn.py:2144:
-		# _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-		# test_nn.py:2062: in _test_EmbeddingBag
-		#     _test_vs_Embedding(N, D, B, L)
-		# test_nn.py:2059: in _test_vs_Embedding
-		#     self.assertEqual(es_weight_grad, e.weight.grad, needed_prec)
-		# common.py:373: in assertEqual
-		#     assertTensorsEqual(x, y)
-		# common.py:365: in assertTensorsEqual
-		#     self.assertLessEqual(max_err, prec, message)
-		# E   AssertionError: tensor(0.0000, device='cuda:0', dtype=torch.float32) not less than or equal to 2e-05 :
-		#  1 failed, 1202 passed, 19 skipped, 2 xfailed, 796 warnings in 1166.73 seconds =
-		# Traceback (most recent call last):
-		#   File "test/run_test.py", line 391, in <module>
-		#     main()
-		#   File "test/run_test.py", line 383, in main
-		#     raise RuntimeError(message)
-		tests_to_skip+=('TestNN and test_embedding_bag_cuda')
+    # ________________________ TestNN.test_embedding_bag_cuda ________________________
+    #
+    # self = <test_nn.TestNN testMethod=test_embedding_bag_cuda>
+    # dtype = torch.float32
+    #
+    #     @unittest.skipIf(not TEST_CUDA, "CUDA unavailable")
+    #     @repeat_test_for_types(ALL_TENSORTYPES)
+    #     @skipIfRocm
+    #     def test_embedding_bag_cuda(self, dtype=torch.float):
+    #         self._test_EmbeddingBag(True, 'sum', False, dtype)
+    #         self._test_EmbeddingBag(True, 'mean', False, dtype)
+    #         self._test_EmbeddingBag(True, 'max', False, dtype)
+    #         if dtype != torch.half:
+    #             # torch.cuda.sparse.HalfTensor is not enabled.
+    #             self._test_EmbeddingBag(True, 'sum', True, dtype)
+    # >           self._test_EmbeddingBag(True, 'mean', True, dtype)
+    #
+    # test_nn.py:2144:
+    # _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+    # test_nn.py:2062: in _test_EmbeddingBag
+    #     _test_vs_Embedding(N, D, B, L)
+    # test_nn.py:2059: in _test_vs_Embedding
+    #     self.assertEqual(es_weight_grad, e.weight.grad, needed_prec)
+    # common.py:373: in assertEqual
+    #     assertTensorsEqual(x, y)
+    # common.py:365: in assertTensorsEqual
+    #     self.assertLessEqual(max_err, prec, message)
+    # E   AssertionError: tensor(0.0000, device='cuda:0', dtype=torch.float32) not less than or equal to 2e-05 :
+    #  1 failed, 1202 passed, 19 skipped, 2 xfailed, 796 warnings in 1166.73 seconds =
+    # Traceback (most recent call last):
+    #   File "test/run_test.py", line 391, in <module>
+    #     main()
+    #   File "test/run_test.py", line 383, in main
+    #     raise RuntimeError(message)
+    tests_to_skip+=('TestNN and test_embedding_bag_cuda')
 fi
 
 
@@ -362,19 +389,19 @@ fi
 # from conda as the conda job for Python 2.7. Yet, this only appears on the
 # conda jobs.
 if [[ "$package_type" == 'conda' && "$py_ver" == '2.7' ]]; then
-		# Traceback (most recent call last):
-		#   File "test_jit.py", line 6281, in test_wrong_return_type
-		#     @torch.jit.script
-		#   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/__init__.py", line 639, in script
-		#     graph = _jit_script_compile(ast, rcb)
-		#   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 80, in get_signature
-		#     return parse_type_line(type_line)
-		#   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 131, in parse_type_line
-		#     return arg_types, ann_to_type(ret_ann)
-		#   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 192, in ann_to_type
-		#     return TupleType([ann_to_type(a) for a in ann.__args__])
-		# TypeError: 'TupleInstance' object is not iterable
-		tests_to_skip+=('TestScript and test_wrong_return_type')
+    # Traceback (most recent call last):
+    #   File "test_jit.py", line 6281, in test_wrong_return_type
+    #     @torch.jit.script
+    #   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/__init__.py", line 639, in script
+    #     graph = _jit_script_compile(ast, rcb)
+    #   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 80, in get_signature
+    #     return parse_type_line(type_line)
+    #   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 131, in parse_type_line
+    #     return arg_types, ann_to_type(ret_ann)
+    #   File "/Users/administrator/nightlies/2018_09_30/wheel_build_dirs/conda_2.7/conda/envs/env_py2.7_0_20180930/lib/python2.7/site-packages/torch/jit/annotations.py", line 192, in ann_to_type
+    #     return TupleType([ann_to_type(a) for a in ann.__args__])
+    # TypeError: 'TupleInstance' object is not iterable
+    tests_to_skip+=('TestScript and test_wrong_return_type')
 fi
 
 # Lots of memory leaks on CUDA
@@ -575,14 +602,14 @@ if [[ "$package_type" == 'conda' && "$cuda_ver" != 'cpu' ]]; then
     # AssertionError: 5120 not less than or equal to 1e-05 : __main__.TestNN.test_NLLLoss_higher_dim_sum_reduction_cuda_float leaked -5120 bytes CUDA memory on device 0
     #tests_to_skip+=('TestNN and test_NLLLoss_higher_dim_sum_reduction_cuda_float')
 
-		# ______________________ TestNN.test_variable_sequence_cuda ______________________
-		# common_utils.py:277: in wrapper
-		#     method(*args, **kwargs)
-		# common_utils.py:241: in __exit__
-		#     self.name, after - before, i))
-		# common_utils.py:399: in assertEqual
-		#     super(TestCase, self).assertLessEqual(abs(x - y), prec, message)
-		# E   AssertionError: 1024 not less than or equal to 1e-05 : test_nn.TestNN.test_variable_sequence_cuda leaked 1024 bytes CUDA memory on device 0
+    # ______________________ TestNN.test_variable_sequence_cuda ______________________
+    # common_utils.py:277: in wrapper
+    #     method(*args, **kwargs)
+    # common_utils.py:241: in __exit__
+    #     self.name, after - before, i))
+    # common_utils.py:399: in assertEqual
+    #     super(TestCase, self).assertLessEqual(abs(x - y), prec, message)
+    # E   AssertionError: 1024 not less than or equal to 1e-05 : test_nn.TestNN.test_variable_sequence_cuda leaked 1024 bytes CUDA memory on device 0
     tests_to_skip+=('TestNN and test_variable_sequence_cuda')
 
     # 3.7_cu90
@@ -621,41 +648,41 @@ fi
 
 if [[ "$(uname)" == 'Darwin' && "$package_type" == 'conda' ]]; then
 
-		#
-		# TestDistBackend
+    #
+    # TestDistBackend
     # Seems like either most of the Mac builds get this error or none of them
     # do
-		#
+    #
 
-		# Traceback (most recent call last):
-		#   File "test_thd_distributed.py", line 1046, in wrapper
-		#     self._join_and_reduce(fn)
-		#   File "test_thd_distributed.py", line 1120, in _join_and_reduce
-		#     first_process.exitcode == SKIP_IF_SMALL_WORLDSIZE_EXIT_CODE
-		# AssertionError
-		tests_to_skip+=('TestDistBackend and test_reduce_group_max')
+    # Traceback (most recent call last):
+    #   File "test_thd_distributed.py", line 1046, in wrapper
+    #     self._join_and_reduce(fn)
+    #   File "test_thd_distributed.py", line 1120, in _join_and_reduce
+    #     first_process.exitcode == SKIP_IF_SMALL_WORLDSIZE_EXIT_CODE
+    # AssertionError
+    tests_to_skip+=('TestDistBackend and test_reduce_group_max')
 
-		# Traceback (most recent call last):
-		#   File "test_thd_distributed.py", line 1046, in wrapper
-		#     self._join_and_reduce(fn)
-		#   File "test_thd_distributed.py", line 1132, in _join_and_reduce
-		#     self.assertEqual(first_process.exitcode, 0)
-		#   File "/Users/administrator/nightlies/2018_10_01/wheel_build_dirs/conda_2.7/pytorch/test/common.py", line 397, in assertEqual
-		#     super(TestCase, self).assertLessEqual(abs(x - y), prec, message)
-		# AssertionError: 1 not less than or equal to 1e-05
-		tests_to_skip+=('TestDistBackend and test_isend')
-		tests_to_skip+=('TestDistBackend and test_reduce_group_min')
-		tests_to_skip+=('TestDistBackend and test_reduce_max')
-		tests_to_skip+=('TestDistBackend and test_reduce_min')
-		tests_to_skip+=('TestDistBackend and test_reduce_group_max')
-		tests_to_skip+=('TestDistBackend and test_reduce_group_min')
-		tests_to_skip+=('TestDistBackend and test_reduce_max')
-		tests_to_skip+=('TestDistBackend and test_reduce_min')
-		tests_to_skip+=('TestDistBackend and test_reduce_product')
-		tests_to_skip+=('TestDistBackend and test_reduce_sum')
-		tests_to_skip+=('TestDistBackend and test_scatter')
-		tests_to_skip+=('TestDistBackend and test_send_recv')
-		tests_to_skip+=('TestDistBackend and test_send_recv_any_source')
+    # Traceback (most recent call last):
+    #   File "test_thd_distributed.py", line 1046, in wrapper
+    #     self._join_and_reduce(fn)
+    #   File "test_thd_distributed.py", line 1132, in _join_and_reduce
+    #     self.assertEqual(first_process.exitcode, 0)
+    #   File "/Users/administrator/nightlies/2018_10_01/wheel_build_dirs/conda_2.7/pytorch/test/common.py", line 397, in assertEqual
+    #     super(TestCase, self).assertLessEqual(abs(x - y), prec, message)
+    # AssertionError: 1 not less than or equal to 1e-05
+    tests_to_skip+=('TestDistBackend and test_isend')
+    tests_to_skip+=('TestDistBackend and test_reduce_group_min')
+    tests_to_skip+=('TestDistBackend and test_reduce_max')
+    tests_to_skip+=('TestDistBackend and test_reduce_min')
+    tests_to_skip+=('TestDistBackend and test_reduce_group_max')
+    tests_to_skip+=('TestDistBackend and test_reduce_group_min')
+    tests_to_skip+=('TestDistBackend and test_reduce_max')
+    tests_to_skip+=('TestDistBackend and test_reduce_min')
+    tests_to_skip+=('TestDistBackend and test_reduce_product')
+    tests_to_skip+=('TestDistBackend and test_reduce_sum')
+    tests_to_skip+=('TestDistBackend and test_scatter')
+    tests_to_skip+=('TestDistBackend and test_send_recv')
+    tests_to_skip+=('TestDistBackend and test_send_recv_any_source')
 fi
 
 
@@ -670,7 +697,7 @@ for exclusion in "${tests_to_skip[@]}"; do
     fi
 done
 
- 
+
 ##############################################################################
 # Run the tests
 ##############################################################################

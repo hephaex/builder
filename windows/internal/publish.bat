@@ -3,13 +3,31 @@
 set SRC_DIR=%~dp0
 pushd %SRC_DIR%
 
-if NOT "%CUDA_VERSION%" == "cpu" (
+if not "%CUDA_VERSION%" == "cpu" (
     set PACKAGE_SUFFIX=_cuda%CUDA_VERSION%
 ) else (
     set PACKAGE_SUFFIX=
 )
 
-set PUBLISH_BRANCH=%PACKAGE%_%DESIRED_PYTHON%%PACKAGE_SUFFIX%
+if "%PACKAGEFULLNAME%" == "Conda" (
+    set PACKAGE=conda
+) else (
+    set PACKAGE=wheels
+)
+
+if "%DEBUG%" == "1" (
+    if not defined PACKAGE_SUFFIX (
+        set PACKAGE_SUFFIX=_debug
+    ) else (
+        set PACKAGE_SUFFIX=%PACKAGE_SUFFIX%_debug
+    )
+)
+
+if not defined PACKAGE_SUFFIX (
+    set PUBLISH_BRANCH=%PACKAGE%_%DESIRED_PYTHON%
+) else (
+    set PUBLISH_BRANCH=%PACKAGE%_%DESIRED_PYTHON%%PACKAGE_SUFFIX%
+)
 
 git clone %ARTIFACT_REPO_URL% -b %PUBLISH_BRANCH% --single-branch >nul 2>&1
 
@@ -52,7 +70,7 @@ if "%RETRY_TIMES%" == "" (
     set /a SLEEP_TIME=%SLEEP_TIME%*2
 )
 
-git push origin %PUBLISH_BRANCH%% -f > nul 2>&1
+git push origin %PUBLISH_BRANCH% -f > nul 2>&1
 
 IF ERRORLEVEL 1 (
     echo Git push retry times remaining: %RETRY_TIMES%

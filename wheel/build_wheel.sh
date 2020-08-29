@@ -92,15 +92,20 @@ pytorch_rootdir="${MAC_PACKAGE_WORK_DIR}/pytorch"
 whl_tmp_dir="${MAC_PACKAGE_WORK_DIR}/dist"
 mkdir -p "$whl_tmp_dir"
 
-# Python 2.7 and 3.5 build against macOS 10.6, others build against 10.7
-if [[ "$desired_python" == 2.7 || "$desired_python" == 3.5 ]]; then
+# Python 3.5 build against macOS 10.6, others build against 10.9
+# NB: Sometimes Anaconda revs the version, in which case you'll have to
+# update this!
+# An example of this happened on Aug 13, 2019, when osx-64/python-2.7.16-h97142e2_2.tar.bz2
+# was uploaded to https://anaconda.org/anaconda/python/files
+if [[ "$desired_python" == 3.5 ]]; then
     mac_version='macosx_10_6_x86_64'
-else
+elif [[ "$desired_python" == 2.7 ]]; then
     mac_version='macosx_10_7_x86_64'
+else
+    mac_version='macosx_10_9_x86_64'
 fi
 
-# Determine the wheel package name so that we can rename it later
-wheel_filename_gen="${TORCH_PACKAGE_NAME}-${build_version}${build_number_prefix}-cp${python_nodot}-cp${python_nodot}m-${mac_version}.whl"
+# Create a consistent wheel package name to rename the wheel to
 wheel_filename_new="${TORCH_PACKAGE_NAME}-${build_version}${build_number_prefix}-cp${python_nodot}-none-${mac_version}.whl"
 
 ###########################################################
@@ -128,21 +133,60 @@ popd
 
 
 export TH_BINARY_BUILD=1
+export INSTALL_TEST=0 # dont install test binaries into site-packages
 export MACOSX_DEPLOYMENT_TARGET=10.10
+export CMAKE_PREFIX_PATH=${CONDA_PREFIX:-"$(dirname $(which conda))/../"}
 
-retry conda install -yq cmake numpy==1.11.3 nomkl setuptools pyyaml cffi typing ninja
+SETUPTOOLS_PINNED_VERSION=""
+PYYAML_PINNED_VERSION=""
+case ${desired_python} in
+    3.5 | 2.7)
+        # setuptools and pyyaml discontinued support for python 3.5 and 2.7
+        continue
+        ;;
+    3*)
+        SETUPTOOLS_PINNED_VERSION="=46.0.0"
+        PYYAML_PINNED_VERSION="=5.3"
+        ;;
+esac
+
+if [[ "$desired_python" == 3.8 ]]; then
+    retry conda install -yq cmake numpy=1.17 nomkl "setuptools${SETUPTOOLS_PINNED_VERSION}" "pyyaml${PYYAML_PINNED_VERSION}" ninja
+else
+    retry conda install -yq cmake numpy==1.11.3 nomkl "setuptools${SETUPTOOLS_PINNED_VERSION}" "pyyaml${PYYAML_PINNED_VERSION}" cffi typing_extensions ninja requests
+fi
+retry conda install -yq mkl-include==2020.1 mkl-static==2020.1 -c intel
 retry pip install -qr "${pytorch_rootdir}/requirements.txt" || true
+
+# For USE_DISTRIBUTED=1 on macOS, need libuv and pkg-config to find libuv.
+export USE_DISTRIBUTED=1
+retry conda install -yq libuv pkg-config
 
 pushd "$pytorch_rootdir"
 echo "Calling setup.py bdist_wheel at $(date)"
+
 python setup.py bdist_wheel -d "$whl_tmp_dir"
+
 echo "Finished setup.py bdist_wheel at $(date)"
-echo "The wheel is in $(find $pytorch_rootdir -name '*.whl')"
+
+echo "delocating wheel dependencies"
+retry pip install https://github.com/matthew-brett/delocate/archive/master.zip
+echo "found the following wheels:"
+find $whl_tmp_dir -name "*.whl"
+echo "running delocate"
+find $whl_tmp_dir -name "*.whl" | xargs -I {} delocate-wheel -v {}
+find $whl_tmp_dir -name "*.whl"
+find $whl_tmp_dir -name "*.whl" | xargs -I {} delocate-listdeps {}
+echo "Finished delocating wheels at $(date)"
+
+echo "The wheel is in $(find $whl_tmp_dir -name '*.whl')"
+
+wheel_filename_gen=$(find $whl_tmp_dir -name '*.whl' | head -n1 | xargs -I {} basename {})
 popd
 
 if [[ -z "$BUILD_PYTHONLESS" ]]; then
     # Copy the whl to a final destination before tests are run
-    echo "Wheel file: $wheel_filename_gen $wheel_filename_new"
+    echo "Renaming Wheel file: $wheel_filename_gen to $wheel_filename_new"
     cp "$whl_tmp_dir/$wheel_filename_gen" "$PYTORCH_FINAL_PACKAGE_DIR/$wheel_filename_new"
 
     ##########################
@@ -178,6 +222,7 @@ else
         cp -r "$(pwd)/any_wheel/torch/lib/include" "$(pwd)/libtorch/"
     fi
     cp -r "$(pwd)/any_wheel/torch/share/cmake" "$(pwd)/libtorch/share/"
+    cp -r "$(pwd)/any_wheel/torch/.dylibs/libiomp5.dylib" "$(pwd)/libtorch/lib/"
     rm -rf "$(pwd)/any_wheel"
 
     echo $PYTORCH_BUILD_VERSION > libtorch/build-version

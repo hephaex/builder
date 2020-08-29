@@ -1,7 +1,19 @@
-set -e
-nvidia-docker build -t soumith/manylinux-cuda80 -f Dockerfile_80 .
-nvidia-docker build -t soumith/manylinux-cuda90 -f Dockerfile_90 .
-nvidia-docker build -t soumith/manylinux-cuda100 -f Dockerfile_100 .
-nvidia-docker push soumith/manylinux-cuda80
-nvidia-docker push soumith/manylinux-cuda90
-nvidia-docker push soumith/manylinux-cuda100
+#!/usr/bin/env bash
+
+set -eou pipefail
+
+build_image() {
+    BASE_CUDA_VERSION=$1
+}
+
+for cuda_version in 9.2 10.1 10.2 11.0; do
+    (
+        set -x
+        docker build \
+            -t "pytorch/manylinux-cuda${cuda_version//./}" \
+            --build-arg "BASE_CUDA_VERSION=${cuda_version}" \
+            -f manywheel/Dockerfile \
+            .
+        docker push "pytorch/manylinux-cuda${cuda_version//./}"
+    )
+done

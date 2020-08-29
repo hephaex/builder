@@ -5,7 +5,7 @@
 set -ex
 
 # Python versions to be installed in /opt/$VERSION_NO
-CPYTHON_VERSIONS="2.7.15 3.5.5 3.6.6 3.7.0"
+CPYTHON_VERSIONS=${CPYTHON_VERSIONS:-"2.7.15 3.5.5 3.6.6 3.7.5 3.8.1"}
 
 # openssl version to build, with expected sha256 hash of .tar.gz
 # archive
@@ -33,8 +33,6 @@ source $MY_DIR/build_utils.sh
 yum -y install bzip2 make git patch unzip bison yasm diffutils \
     automake which file cmake28 \
     kernel-devel-`uname -r` \
-    devtoolset-3-binutils devtoolset-3-gcc \
-    devtoolset-3-gcc-c++ devtoolset-3-gcc-gfortran \
     ${PYTHON_COMPILE_DEPS}
 
 # Install newest autoconf
@@ -73,11 +71,11 @@ curl-config --features
 rm -rf /usr/local/ssl
 
 # Install patchelf (latest with unreleased bug fixes)
-curl -sLOk https://nipy.bic.berkeley.edu/manylinux/patchelf-0.9njs2.tar.gz
-check_sha256sum patchelf-0.9njs2.tar.gz $PATCHELF_HASH
-tar -xzf patchelf-0.9njs2.tar.gz
-(cd patchelf-0.9njs2 && ./configure && make && make install)
-rm -rf patchelf-0.9njs2.tar.gz patchelf-0.9njs2
+curl -sLOk https://nixos.org/releases/patchelf/patchelf-0.10/patchelf-0.10.tar.gz
+# check_sha256sum patchelf-0.9njs2.tar.gz $PATCHELF_HASH
+tar -xzf patchelf-0.10.tar.gz
+(cd patchelf-0.10 && ./configure && make && make install)
+rm -rf patchelf-0.10.tar.gz patchelf-0.10
 
 # Install latest pypi release of auditwheel
 $PY36_BIN/pip install auditwheel

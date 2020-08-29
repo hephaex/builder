@@ -67,6 +67,13 @@ conda/pytorch-src
 conda/torchvision-src
 wheel/pytorch-src
 wheel/torchvision-src
-torch_nightly.html
+torch*.html
+*-torch*.html
 
 node_modules
+
+# IDE files
+.idea
+
+# mypy
+**/.mypy_cache/

@@ -14,6 +14,7 @@ export PYTORCH_BUILD_NUMBER=$PKG_BUILDNUM
 # for cpp_tests I believe though. TODO figure out what's going on here and fix
 # it. It would be nice to use ninja in the builds of the conda binaries as well
 export USE_NINJA=OFF
+export INSTALL_TEST=0 # dont install test binaries into site-packages
 
 # MacOS build is simple, and will not be for CUDA
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -25,19 +26,21 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 fi
 
 
-if [[ -z "$NO_CUDA" || "$NO_CUDA" == 0 ]]; then
+if [[ -z "$USE_CUDA" || "$USE_CUDA" == 1 ]]; then
     build_with_cuda=1
 fi
 if [[ -n "$build_with_cuda" ]]; then
-    export TORCH_CUDA_ARCH_LIST="3.5;5.0+PTX"
+    export TORCH_CUDA_ARCH_LIST="3.7+PTX;5.0"
     if [[ $CUDA_VERSION == 8.0* ]]; then
         export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;6.0;6.1"
     elif [[ $CUDA_VERSION == 9.0* ]]; then
         export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;6.0;7.0"
     elif [[ $CUDA_VERSION == 9.2* ]]; then
         export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;6.0;6.1;7.0"
-    elif [[ $CUDA_VERSION == 10.0* ]]; then
+    elif [[ $CUDA_VERSION == 10* ]]; then
         export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;6.0;6.1;7.0;7.5"
+    elif [[ $CUDA_VERSION == 11* ]]; then
+        export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;6.0;6.1;7.0;7.5;8.0"
     fi
     export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
     export NCCL_ROOT_DIR=/usr/local/cuda
@@ -112,13 +115,14 @@ done
 # set RPATH of _C.so and similar to $ORIGIN, $ORIGIN/lib and conda/lib
 find $SP_DIR/torch -name "*.so*" -maxdepth 1 -type f | while read sofile; do
     echo "Setting rpath of $sofile to " '$ORIGIN:$ORIGIN/lib:$ORIGIN/../../..'
-    patchelf --set-rpath '$ORIGIN:$ORIGIN/lib:$ORIGIN/../../..' $sofile
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/lib:$ORIGIN/../../..' --force-rpath \
+             $sofile
     patchelf --print-rpath $sofile
 done
 
 # set RPATH of lib/ files to $ORIGIN and conda/lib
 find $SP_DIR/torch/lib -name "*.so*" -maxdepth 1 -type f | while read sofile; do
-    echo "Setting rpath of $sofile to " '$ORIGIN:$ORIGIN/lib:$ORIGIN/../../../..'
-    patchelf --set-rpath '$ORIGIN:$ORIGIN/../../../..' $sofile
+    echo "Setting rpath of $sofile to " '$ORIGIN:$ORIGIN/../../../..'
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../../../..' --force-rpath $sofile
     patchelf --print-rpath $sofile
 done

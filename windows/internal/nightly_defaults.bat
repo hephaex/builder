@@ -1,5 +1,16 @@
 @echo off
 
+if "%~1"=="" goto arg_error
+if NOT "%~2"=="" goto arg_error
+goto arg_end
+
+:arg_error
+
+echo Illegal number of parameters. Pass packge type `Conda` or `Wheels`.
+exit /b 1
+
+:arg_end
+
 echo "nightly_defaults.bat at %CD% starting at %DATE%"
 
 set SRC_DIR=%~dp0\..
@@ -25,7 +36,7 @@ if "%NIGHTLIES_FOLDER%" == "" set "NIGHTLIES_FOLDER=%SRC_DIR%"
 ::   the current date.
 
 
-if "%NIGHTLIES_DATE%" == "" ( goto date_start ) else ( goto date_end )
+if NOT "%NIGHTLIES_DATE%" == "" goto date_end
 
 :date_start
 
@@ -91,17 +102,17 @@ if "%PYTORCH_REPO%" == "" set PYTORCH_REPO=pytorch
 ::   my_branch_name) or can be a git commit (git checkout 4b2674n...). Default
 ::   is 'latest', which is a special term that signals to pull the last commit
 ::   before 0:00 midnight on the NIGHTLIES_DATE
-if "%PYTORCH_BRANCH%" == "" set PYTORCH_BRANCH=latest
+if "%PYTORCH_BRANCH%" == "" set PYTORCH_BRANCH=nightly
 
 :: Clone the requested pytorch checkout
-if exist "%NIGHTLIES_PYTORCH_ROOT%" ( goto clone_end ) else ( goto clone_start )
+if exist "%NIGHTLIES_PYTORCH_ROOT%" goto clone_end
 
 :clone_start
 
 git clone --recursive "https://github.com/%PYTORCH_REPO%/pytorch.git" "%NIGHTLIES_PYTORCH_ROOT%"
 pushd "%NIGHTLIES_PYTORCH_ROOT%"
 
-if "%PYTORCH_BRANCH%" == "latest" ( goto latest_start ) else ( goto latest_end )
+if NOT "%PYTORCH_BRANCH%" == "latest" goto latest_end
 
 :latest_start
 
@@ -122,12 +133,26 @@ popd
 
 :clone_end
 
+if "%CUDA_VERSION%" == "cpu" (
+    set _DESIRED_CUDA=cpu
+) else (
+    set _DESIRED_CUDA=cu%CUDA_VERSION%
+)
+
 :: PYTORCH_BUILD_VERSION
 ::   The actual version string. Used in conda like
 ::       pytorch-nightly==1.0.0.dev20180908
 ::   or in manylinux like
 ::       torch_nightly-1.0.0.dev20180908-cp27-cp27m-linux_x86_64.whl
-if "%PYTORCH_BUILD_VERSION%" == "" set PYTORCH_BUILD_VERSION=1.0.0.dev%NIGHTLIES_DATE_COMPACT%
+if "%PYTORCH_BUILD_VERSION%" == "" set PYTORCH_BUILD_VERSION=1.5.0.dev%NIGHTLIES_DATE_COMPACT%
+
+if "%~1" == "Wheels" (
+    if "%BUILD_PYTHONLESS%" == "" (
+        if not "%CUDA_VERSION%" == "102" (
+            set PYTORCH_BUILD_VERSION=%PYTORCH_BUILD_VERSION%+%_DESIRED_CUDA%
+        )
+    )
+)
 
 :: PYTORCH_BUILD_NUMBER
 ::   This is usually the number 1. If more than one build is uploaded for the
@@ -152,7 +177,7 @@ if "%TORCH_CONDA_BUILD_FOLDER%" == "" set TORCH_CONDA_BUILD_FOLDER=pytorch-night
 ::   pytorch-nightly. N.B. that pip will change all '-' to '_' but conda will
 ::   not. This is dealt with in downstream scripts.
 :: TODO: Not supported yet
-if "%TORCH_PACKAGE_NAME%" == "" set TORCH_PACKAGE_NAME=torch-nightly
+if "%TORCH_PACKAGE_NAME%" == "" set TORCH_PACKAGE_NAME=torch
 
 :: PIP_UPLOAD_FOLDER should end in a slash. This is to handle it being empty
 :: (when uploading to e.g. whl/cpu/) and also to handle nightlies (when
