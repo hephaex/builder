@@ -101,6 +101,8 @@ if [[ "$desired_python" == 3.5 ]]; then
     mac_version='macosx_10_6_x86_64'
 elif [[ "$desired_python" == 2.7 ]]; then
     mac_version='macosx_10_7_x86_64'
+elif [[ -n "$CROSS_COMPILE_ARM64" ]]; then
+    mac_version='macosx_11_0_arm64'
 else
     mac_version='macosx_10_9_x86_64'
 fi
@@ -109,10 +111,6 @@ fi
 wheel_filename_new="${TORCH_PACKAGE_NAME}-${build_version}${build_number_prefix}-cp${python_nodot}-none-${mac_version}.whl"
 
 ###########################################################
-# Install into a fresh env
-tmp_env_name="wheel_py$python_nodot"
-conda create -yn "$tmp_env_name" python="$desired_python"
-source activate "$tmp_env_name"
 
 # Have a separate Pytorch repo clone
 if [[ ! -d "$pytorch_rootdir" ]]; then
@@ -125,7 +123,7 @@ if [[ ! -d "$pytorch_rootdir" ]]; then
     popd
 fi
 pushd "$pytorch_rootdir"
-git submodule update --init --recursive
+git submodule update --init --recursive --jobs 0
 popd
 
 ##########################
@@ -137,30 +135,43 @@ export INSTALL_TEST=0 # dont install test binaries into site-packages
 export MACOSX_DEPLOYMENT_TARGET=10.10
 export CMAKE_PREFIX_PATH=${CONDA_PREFIX:-"$(dirname $(which conda))/../"}
 
-SETUPTOOLS_PINNED_VERSION=""
-PYYAML_PINNED_VERSION=""
+SETUPTOOLS_PINNED_VERSION="=46.0.0"
+PYYAML_PINNED_VERSION="=5.3"
+EXTRA_CONDA_INSTALL_FLAGS=""
 case ${desired_python} in
-    3.5 | 2.7)
-        # setuptools and pyyaml discontinued support for python 3.5 and 2.7
-        continue
+    3.9)
+        SETUPTOOLS_PINNED_VERSION=">=46.0.0"
+        PYYAML_PINNED_VERSION=">=5.3"
+        NUMPY_PINNED_VERSION="=1.19"
         ;;
-    3*)
-        SETUPTOOLS_PINNED_VERSION="=46.0.0"
-        PYYAML_PINNED_VERSION="=5.3"
+    3.8)
+        NUMPY_PINNED_VERSION="=1.17"
+        ;;
+    *)
+        NUMPY_PINNED_VERSION="=1.11.3"
         ;;
 esac
 
-if [[ "$desired_python" == 3.8 ]]; then
-    retry conda install -yq cmake numpy=1.17 nomkl "setuptools${SETUPTOOLS_PINNED_VERSION}" "pyyaml${PYYAML_PINNED_VERSION}" ninja
-else
-    retry conda install -yq cmake numpy==1.11.3 nomkl "setuptools${SETUPTOOLS_PINNED_VERSION}" "pyyaml${PYYAML_PINNED_VERSION}" cffi typing_extensions ninja requests
-fi
-retry conda install -yq mkl-include==2020.1 mkl-static==2020.1 -c intel
+# Install into a fresh env
+tmp_env_name="wheel_py$python_nodot"
+conda create ${EXTRA_CONDA_INSTALL_FLAGS} -yn "$tmp_env_name" python="$desired_python"
+source activate "$tmp_env_name"
+
+retry conda install ${EXTRA_CONDA_INSTALL_FLAGS} -yq cmake "numpy${NUMPY_PINNED_VERSION}" nomkl "setuptools${SETUPTOOLS_PINNED_VERSION}" "pyyaml${PYYAML_PINNED_VERSION}" cffi typing_extensions ninja requests
+retry conda install ${EXTRA_CONDA_INSTALL_FLAGS} -yq mkl-include==2020.1 mkl-static==2020.1 -c intel
 retry pip install -qr "${pytorch_rootdir}/requirements.txt" || true
 
 # For USE_DISTRIBUTED=1 on macOS, need libuv and pkg-config to find libuv.
 export USE_DISTRIBUTED=1
-retry conda install -yq libuv pkg-config
+retry conda install ${EXTRA_CONDA_INSTALL_FLAGS} -yq libuv pkg-config
+
+if [[ -n "$CROSS_COMPILE_ARM64" ]]; then
+    export CMAKE_OSX_ARCHITECTURES=arm64
+    export USE_MKLDNN=OFF
+    export USE_NNPACK=OFF
+    export USE_QNNPACK=OFF
+    export BUILD_TEST=OFF
+fi
 
 pushd "$pytorch_rootdir"
 echo "Calling setup.py bdist_wheel at $(date)"
@@ -190,24 +201,29 @@ if [[ -z "$BUILD_PYTHONLESS" ]]; then
     cp "$whl_tmp_dir/$wheel_filename_gen" "$PYTORCH_FINAL_PACKAGE_DIR/$wheel_filename_new"
 
     ##########################
-    # now test the binary
-    pip uninstall -y "$TORCH_PACKAGE_NAME" || true
-    pip uninstall -y "$TORCH_PACKAGE_NAME" || true
+    # now test the binary, unless it's cross compiled arm64
+    if [[ -z "$CROSS_COMPILE_ARM64" ]]; then
+        pip uninstall -y "$TORCH_PACKAGE_NAME" || true
+        pip uninstall -y "$TORCH_PACKAGE_NAME" || true
 
-    # Only one binary is built, so it's safe to just specify the whl directory
-    pip install "$TORCH_PACKAGE_NAME" --no-index -f "$whl_tmp_dir" --no-dependencies -v
+        # Create new "clean" conda environment for testing
+        conda create ${EXTRA_CONDA_INSTALL_FLAGS} -yn "test_conda_env" python="$desired_python"
+        conda activate test_conda_env
 
-    # Run the tests
-    echo "$(date) :: Running tests"
-    pushd "$pytorch_rootdir"
-    "${SOURCE_DIR}/../run_tests.sh" 'wheel' "$desired_python" 'cpu'
-    popd
-    echo "$(date) :: Finished tests"
+        pip install "$PYTORCH_FINAL_PACKAGE_DIR/$wheel_filename_new" -v
+
+        echo "$(date) :: Running tests"
+        pushd "$pytorch_rootdir"
+        "${SOURCE_DIR}/../run_tests.sh" 'wheel' "$desired_python" 'cpu'
+        popd
+        echo "$(date) :: Finished tests"
+    fi
 else
     pushd "$pytorch_rootdir"
     mkdir -p build
     pushd build
-    python ../tools/build_libtorch.py
+    # TODO: Remove this flag once https://github.com/pytorch/pytorch/issues/55952 is closed
+    CFLAGS='-Wno-deprecated-declarations' python ../tools/build_libtorch.py
     popd
 
     mkdir -p libtorch/{lib,bin,include,share}
@@ -232,9 +248,3 @@ else
     cp "$PYTORCH_FINAL_PACKAGE_DIR/libtorch-macos-$PYTORCH_BUILD_VERSION.zip"  \
        "$PYTORCH_FINAL_PACKAGE_DIR/libtorch-macos-latest.zip"
 fi
-
-# Now delete the temporary build folder and temporary env
-# $whl_tmp_dir is not deleted since it will be the only place to find the whl
-# if PYTORCH_FINAL_PACKAGE_DIR isn't specified
-source deactivate
-conda env remove -yn "$tmp_env_name"

@@ -4,6 +4,7 @@
 set -ex
 SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
+
 # Require only one python installation
 if [[ -z "$DESIRED_PYTHON" ]]; then
     echo "Need to set DESIRED_PYTHON env variable"
@@ -59,20 +60,26 @@ export PYTORCH_BUILD_NUMBER=$build_number
 export CMAKE_LIBRARY_PATH="/opt/intel/lib:/lib:$CMAKE_LIBRARY_PATH"
 export CMAKE_INCLUDE_PATH="/opt/intel/include:$CMAKE_INCLUDE_PATH"
 
+if [[ -e /opt/openssl ]]; then
+    export OPENSSL_ROOT_DIR=/opt/openssl
+    export CMAKE_INCLUDE_PATH="/opt/openssl/include":$CMAKE_INCLUDE_PATH
+fi
 
 # If given a python version like 3.6m or 2.7mu, convert this to the format we
 # expect. The binary CI jobs pass in python versions like this; they also only
 # ever pass one python version, so we assume that DESIRED_PYTHON is not a list
 # in this case
 if [[ -n "$DESIRED_PYTHON" && "$DESIRED_PYTHON" != cp* ]]; then
-    if [[ "$DESIRED_PYTHON" == '2.7mu' ]]; then
-      DESIRED_PYTHON='cp27-cp27mu'
-    elif [[ "$DESIRED_PYTHON" == '3.8m' ]]; then
-      DESIRED_PYTHON='cp38-cp38'
-    else
-      python_nodot="$(echo $DESIRED_PYTHON | tr -d m.u)"
-      DESIRED_PYTHON="cp${python_nodot}-cp${python_nodot}m"
-    fi
+    python_nodot="$(echo $DESIRED_PYTHON | tr -d m.u)"
+    case ${DESIRED_PYTHON} in
+      3.[6-7]*)
+        DESIRED_PYTHON="cp${python_nodot}-cp${python_nodot}m"
+        ;;
+      # Should catch 3.8+
+      3.*)
+        DESIRED_PYTHON="cp${python_nodot}-cp${python_nodot}"
+        ;;
+    esac
 fi
 py_majmin="${DESIRED_PYTHON:2:1}.${DESIRED_PYTHON:3:1}"
 pydir="/opt/python/$DESIRED_PYTHON"
@@ -93,7 +100,7 @@ if [[ ! -d "$pytorch_rootdir" ]]; then
 else
     pushd $pytorch_rootdir
 fi
-git submodule update --init --recursive
+git submodule update --init --recursive --jobs 0
 
 export PATCHELF_BIN=/usr/local/bin/patchelf
 patchelf_version=`$PATCHELF_BIN --version`
@@ -108,13 +115,18 @@ fi
 #######################################################
 python setup.py clean
 retry pip install -qr requirements.txt
-if [[ "$DESIRED_PYTHON"  == "cp37-cp37m" ]]; then
-    retry pip install -q numpy==1.15
-elif [[ "$DESIRED_PYTHON"  == "cp38-cp38" ]]; then
-    retry pip install -q numpy==1.15
-else
+case ${DESIRED_PYTHON} in
+  cp36-cp36m)
     retry pip install -q numpy==1.11
-fi
+    ;;
+  cp3[7-8]*)
+    retry pip install -q numpy==1.15
+    ;;
+  # Should catch 3.9+
+  *)
+    retry pip install -q numpy==1.19.4
+    ;;
+esac
 
 if [[ "$DESIRED_DEVTOOLSET" == *"cxx11-abi"* ]]; then
     export _GLIBCXX_USE_CXX11_ABI=1
@@ -122,9 +134,32 @@ else
     export _GLIBCXX_USE_CXX11_ABI=0
 fi
 
+if [[ "$DESIRED_CUDA" == *"rocm"* ]]; then
+    echo "Calling build_amd.py at $(date)"
+    python tools/amd_build/build_amd.py
+fi
+
+# This value comes from binary_linux_build.sh (and should only be set to true
+# for master / release branches)
+BUILD_DEBUG_INFO=${BUILD_DEBUG_INFO:=0}
+
+# TODO: Delete within a few days of 6/15/21! This is a hack to get debug info
+# building on PRs without merging in the change to PyTorch proper that sets
+# BUILD_DEBUG_INFO=1
+if [[ $CIRCLE_BRANCH == release/1.9 ]]; then
+    export BUILD_DEBUG_INFO=1
+fi
+
+if [[ $BUILD_DEBUG_INFO == "1" ]]; then
+    echo "Building wheel and debug info"
+else
+    echo "BUILD_DEBUG_INFO was not set, skipping debug info"
+fi
+
 echo "Calling setup.py bdist at $(date)"
 time CMAKE_ARGS=${CMAKE_ARGS[@]} \
      EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
+     BUILD_LIBTORCH_CPU_WITH_DEBUG=$BUILD_DEBUG_INFO \
      python setup.py bdist_wheel -d /tmp/$WHEELHOUSE_DIR
 echo "Finished setup.py bdist at $(date)"
 
@@ -193,7 +228,9 @@ fname_with_sha256() {
     HASH=$(sha256sum $1 | cut -c1-8)
     DIRNAME=$(dirname $1)
     BASENAME=$(basename $1)
-    if [[ $BASENAME == "libnvrtc-builtins.so" ]]; then
+    # Do not rename nvrtc-builtins.so as they are dynamically loaded
+    # by libnvrts.so
+    if [[ $BASENAME == "libnvrtc-builtins.s"* ]]; then
         echo $1
     else
         INITNAME=$(echo $BASENAME | cut -f1 -d".")
@@ -212,6 +249,23 @@ make_wheel_record() {
         FSIZE=$(ls -nl $FPATH | awk '{print $5}')
         echo "$FPATH,sha256=$HASH,$FSIZE"
     fi
+}
+
+replace_needed_sofiles() {
+    find $1 -name '*.so*' | while read sofile; do
+        origname=$2
+        patchedname=$3
+        if [[ "$origname" != "$patchedname" ]]; then
+            set +e
+            $PATCHELF_BIN --print-needed $sofile | grep $origname 2>&1 >/dev/null
+            ERRCODE=$?
+            set -e
+            if [ "$ERRCODE" -eq "0" ]; then
+                echo "patching $sofile entry $origname to $patchedname"
+                $PATCHELF_BIN --replace-needed $origname $patchedname $sofile
+            fi
+        fi
+    done
 }
 
 echo 'Built this wheel:'
@@ -270,20 +324,19 @@ for pkg in /$WHEELHOUSE_DIR/torch*linux*.whl /$LIBTORCH_HOUSE_DIR/libtorch*.zip;
 
         echo "patching to fix the so names to the hashed names"
         for ((i=0;i<${#DEPS_LIST[@]};++i)); do
-            find $PREFIX -name '*.so*' | while read sofile; do
-                origname=${DEPS_SONAME[i]}
-                patchedname=${patched[i]}
-                if [[ "$origname" != "$patchedname" ]]; then
-                    set +e
-                    $PATCHELF_BIN --print-needed $sofile | grep $origname 2>&1 >/dev/null
-                    ERRCODE=$?
-                    set -e
-                    if [ "$ERRCODE" -eq "0" ]; then
-                        echo "patching $sofile entry $origname to $patchedname"
-                        $PATCHELF_BIN --replace-needed $origname $patchedname $sofile
-                    fi
-                fi
-            done
+            replace_needed_sofiles $PREFIX ${DEPS_SONAME[i]} ${patched[i]}
+            # do the same for caffe2, if it exists
+            if [[ -d caffe2 ]]; then
+                replace_needed_sofiles caffe2 ${DEPS_SONAME[i]} ${patched[i]}
+            fi
+        done
+
+        # copy over needed auxiliary files
+        for ((i=0;i<${#DEPS_AUX_SRCLIST[@]};++i)); do
+            srcpath=${DEPS_AUX_SRCLIST[i]}
+            dstpath=$PREFIX/${DEPS_AUX_DSTLIST[i]}
+            mkdir -p $(dirname $dstpath)
+            cp $srcpath $dstpath
         done
     fi
 
@@ -310,6 +363,34 @@ for pkg in /$WHEELHOUSE_DIR/torch*linux*.whl /$LIBTORCH_HOUSE_DIR/libtorch*.zip;
         find * -type f | while read fname; do
             echo $(make_wheel_record $fname) >>$record_file
         done
+    fi
+
+    if [[ $BUILD_DEBUG_INFO == "1" ]]; then
+        pushd "$PREFIX/lib"
+
+        # Duplicate library into debug lib
+        cp libtorch_cpu.so libtorch_cpu.so.dbg
+
+        # Keep debug symbols on debug lib
+        strip --only-keep-debug libtorch_cpu.so.dbg
+
+        # Remove debug info from release lib
+        strip --strip-debug libtorch_cpu.so
+
+        objcopy libtorch_cpu.so --add-gnu-debuglink=libtorch_cpu.so.dbg
+
+        # Zip up debug info
+        mkdir -p /tmp/debug
+        mv libtorch_cpu.so.dbg /tmp/debug/libtorch_cpu.so.dbg
+        CRC32=$(objcopy --dump-section .gnu_debuglink=>(tail -c4 | od -t x4 -An | xargs echo) libtorch_cpu.so)
+
+        pushd /tmp
+        PKG_NAME=$(basename "$pkg" | sed 's/\.whl$//g')
+        zip /tmp/debug-whl-libtorch-"$PKG_NAME"-"$CRC32".zip /tmp/debug/libtorch_cpu.so.dbg
+        cp /tmp/debug-whl-libtorch-"$PKG_NAME"-"$CRC32".zip "$PYTORCH_FINAL_PACKAGE_DIR"
+        popd
+
+        popd
     fi
 
     # zip up the wheel back
@@ -349,10 +430,12 @@ if [[ -z "$BUILD_PYTHONLESS" ]]; then
   pip install "$TORCH_PACKAGE_NAME" --no-index -f /$WHEELHOUSE_DIR --no-dependencies -v
 
   # Print info on the libraries installed in this wheel
+  # Rather than adjust find command to skip non-library files with an embedded *.so* in their name,
+  # since this is only for reporting purposes, we add the || true to the ldd command.
   installed_libraries=($(find "$pydir/lib/python${py_majmin}/site-packages/torch/" -name '*.so*'))
   echo "The wheel installed all of the libraries: ${installed_libraries[@]}"
   for installed_lib in "${installed_libraries[@]}"; do
-      ldd "$installed_lib"
+      ldd "$installed_lib" || true
   done
 
   # Run the tests

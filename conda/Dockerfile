@@ -1,3 +1,5 @@
+ARG CUDA_VERSION=10.2
+ARG BASE_TARGET=cuda${CUDA_VERSION}
 FROM nvidia/cuda:9.2-devel-centos7 as base
 
 ENV LC_ALL en_US.UTF-8
@@ -18,47 +20,86 @@ RUN yum install -y cmake3 && \
 ENV PATH=/opt/rh/devtoolset-7/root/usr/bin:$PATH
 ENV LD_LIBRARY_PATH=/opt/rh/devtoolset-7/root/usr/lib64:/opt/rh/devtoolset-7/root/usr/lib:$LD_LIBRARY_PATH
 
-RUN yum install -y autoconf aclocal automake make
+RUN yum install -y autoconf aclocal automake make sudo
+RUN rm -rf /usr/local/cuda-*
 
 FROM base as patchelf
 # Install patchelf
 ADD ./common/install_patchelf.sh install_patchelf.sh
 RUN bash ./install_patchelf.sh && rm install_patchelf.sh && cp $(which patchelf) /patchelf
 
+FROM base as openssl
+# Install openssl
+ADD ./common/install_openssl.sh install_openssl.sh
+RUN bash ./install_openssl.sh && rm install_openssl.sh
+
 FROM base as conda
 # Install Anaconda
 ADD ./common/install_conda.sh install_conda.sh
 RUN bash ./install_conda.sh && rm install_conda.sh
+# conda-package-handling fails out for larger tarballs,
+# see: https://github.com/conda/conda-package-handling/issues/71
+RUN /opt/conda/bin/conda install -y conda-package-handling=1.6.0
 
 # Install CUDA
 FROM base as cuda
+RUN rm -rf /usr/local/cuda-*
 ADD ./common/install_cuda.sh install_cuda.sh
 
-FROM cuda as cuda92
+FROM cuda as cuda9.2
 RUN bash ./install_cuda.sh 9.2
+ENV DESIRED_CUDA=9.2
 
-FROM cuda as cuda101
+FROM cuda as cuda10.1
 RUN bash ./install_cuda.sh 10.1
+ENV DESIRED_CUDA=10.1
 
-FROM cuda as cuda102
+FROM cuda as cuda10.2
 RUN bash ./install_cuda.sh 10.2
+ENV DESIRED_CUDA=10.2
 
-FROM cuda as cuda110
+FROM cuda as cuda11.0
 RUN bash ./install_cuda.sh 11.0
+ENV DESIRED_CUDA=11.0
 
-# Instal MNIST test data
+FROM cuda as cuda11.1
+RUN bash ./install_cuda.sh 11.1
+ENV DESIRED_CUDA=11.1
+
+FROM cuda as cuda11.2
+RUN bash ./install_cuda.sh 11.2
+ENV DESIRED_CUDA=11.2
+
+FROM cuda as cuda11.3
+RUN bash ./install_cuda.sh 11.3
+ENV DESIRED_CUDA=11.3
+
+# Install MNIST test data
 FROM base as mnist
 ADD ./common/install_mnist.sh install_mnist.sh
 RUN bash ./install_mnist.sh
 
-FROM base as final
-COPY --from=patchelf /patchelf            /usr/local/bin/patchelf
-COPY --from=conda    /opt/conda           /opt/conda
-RUN rm -rf /usr/local/cuda-*
-COPY --from=cuda92   /usr/local/cuda-9.2  /usr/local/cuda-9.2
-COPY --from=cuda101  /usr/local/cuda-10.1 /usr/local/cuda-10.1
-COPY --from=cuda102  /usr/local/cuda-10.2 /usr/local/cuda-10.2
-COPY --from=cuda110  /usr/local/cuda-11.0 /usr/local/cuda-11.0
-ADD ./java/jni.h     /usr/local/include/jni.h
-ENV PATH /opt/conda/bin:$PATH
+FROM base as all_cuda
+COPY --from=cuda9.2   /usr/local/cuda-9.2  /usr/local/cuda-9.2
+COPY --from=cuda10.1  /usr/local/cuda-10.1 /usr/local/cuda-10.1
+COPY --from=cuda10.2  /usr/local/cuda-10.2 /usr/local/cuda-10.2
+COPY --from=cuda11.0  /usr/local/cuda-11.0 /usr/local/cuda-11.0
+COPY --from=cuda11.1  /usr/local/cuda-11.1 /usr/local/cuda-11.1
+COPY --from=cuda11.2  /usr/local/cuda-11.2 /usr/local/cuda-11.2
+COPY --from=cuda11.3  /usr/local/cuda-11.3 /usr/local/cuda-11.3
+
+FROM ${BASE_TARGET} as final
+# Install LLVM
+COPY --from=pytorch/llvm:9.0.1 /opt/llvm              /opt/llvm
+COPY --from=pytorch/llvm:9.0.1 /opt/llvm_no_cxx11_abi /opt/llvm_no_cxx11_abi
+COPY --from=openssl            /opt/openssl           /opt/openssl
+COPY --from=patchelf           /patchelf              /usr/local/bin/patchelf
+COPY --from=conda              /opt/conda             /opt/conda
+ADD  ./java/jni.h /usr/local/include/jni.h
+ENV  PATH /opt/conda/bin:$PATH
 COPY --from=mnist  /usr/local/mnist /usr/local/mnist
+RUN rm -rf /usr/local/cuda
+RUN chmod o+rw /usr/local
+RUN touch /.condarc && \
+    chmod o+rw /.condarc && \
+    chmod -R o+rw /opt/conda

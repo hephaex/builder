@@ -1,0 +1,21 @@
+package:
+  name: "{{ environ.get('PACKAGE_NAME') }}"
+  version: 2.5.2
+
+source:
+   url: http://icl.utk.edu/projectsfiles/magma/downloads/magma-2.5.2.tar.gz
+   patches:
+     - cmakelists.patch
+     - thread_queue.patch
+{{ environ.get('CUDA_POINTER_ATTR_PATCH')}}
+
+build:
+  number: 1
+  script_env:
+    - DESIRED_CUDA
+    - CUDA_ARCH_LIST
+
+about:
+  home: http://icl.cs.utk.edu/magma/software/index.html
+  license: BSD
+  license_file: COPYRIGHT

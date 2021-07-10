@@ -56,23 +56,29 @@ FOR %%v IN (%DESIRED_PYTHON%) DO (
     set PYTHON_VERSION_STR=%%v
     set PYTHON_VERSION_STR=!PYTHON_VERSION_STR:.=!
     conda remove -n py!PYTHON_VERSION_STR! --all -y || rmdir %CONDA_HOME%\envs\py!PYTHON_VERSION_STR! /s
-    if "%%v" == "3.6" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" cffi pyyaml boto3 cmake ninja typing_extensions python=%%v
-    if "%%v" == "3.7" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" cffi pyyaml boto3 cmake ninja typing_extensions python=%%v
-    if "%%v" == "3.8" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" pyyaml boto3 cmake ninja typing_extensions python=%%v
-    if "%%v" == "3" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl>=2019" pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3.6" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl=2020.2" cffi pyyaml boto3 cmake ninja typing_extensions dataclasses python=%%v
+    if "%%v" == "3.7" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl=2020.2" cffi pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3.8" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl=2020.2" pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3.9" conda create -n py!PYTHON_VERSION_STR! -y -q "numpy>=1.11" "mkl=2020.2" pyyaml boto3 cmake ninja typing_extensions python=%%v
+    if "%%v" == "3" conda create -n py!PYTHON_VERSION_STR! -y -q numpy=1.11 "mkl=2020.2" pyyaml boto3 cmake ninja typing_extensions python=%%v
 )
 endlocal
 
+::Install libuv
+conda install -y -q -c conda-forge libuv=1.39
+set libuv_ROOT=%CONDA_HOME%\Library
+echo libuv_ROOT=%libuv_ROOT%
+
 :: Install MKL
 rmdir /s /q mkl
-del mkl_2019.4.245.7z
-curl https://s3.amazonaws.com/ossci-windows/mkl_2020.0.166.7z -k -O
-7z x -aoa mkl_2020.0.166.7z -omkl
+del mkl_2020.2.254.7z
+curl https://s3.amazonaws.com/ossci-windows/mkl_2020.2.254.7z -k -O
+7z x -aoa mkl_2020.2.254.7z -omkl
 set CMAKE_INCLUDE_PATH=%cd%\mkl\include
 set LIB=%cd%\mkl\lib;%LIB%
 
 :: Download MAGMA Files on CUDA builds
-set MAGMA_VERSION=2.5.3
+set MAGMA_VERSION=2.5.4
 if "%CUDA_VERSION%" == "92" set MAGMA_VERSION=2.5.2
 if "%CUDA_VERSION%" == "100" set MAGMA_VERSION=2.5.2
 
@@ -102,7 +108,7 @@ if "%USE_SCCACHE%" == "1" (
         set SCCACHE_IDLE_TIMEOUT=1500
 
         :: randomtemp is used to resolve the intermittent build error related to CUDA.
-        :: code: https://github.com/peterjc123/randomtemp
+        :: code: https://github.com/peterjc123/randomtemp-rust
         :: issue: https://github.com/pytorch/pytorch/issues/25393
         ::
         :: Previously, CMake uses CUDA_NVCC_EXECUTABLE for finding nvcc and then
@@ -110,7 +116,7 @@ if "%USE_SCCACHE%" == "1" (
         :: in PATH, and then pass the arguments to it.
         :: Currently, randomtemp is placed before sccache (%TMP_DIR_WIN%\bin\nvcc)
         :: so we are actually pretending sccache instead of nvcc itself.
-        curl -kL https://github.com/peterjc123/randomtemp/releases/download/v0.3/randomtemp.exe --output %CD%\tmp_bin\randomtemp.exe
+        curl -kL https://github.com/peterjc123/randomtemp-rust/releases/download/v0.3/randomtemp.exe --output %CD%\tmp_bin\randomtemp.exe
         set RANDOMTEMP_EXECUTABLE=%CD%\tmp_bin\nvcc.exe
         set CUDA_NVCC_EXECUTABLE=%CD%\tmp_bin\randomtemp.exe
         set RANDOMTEMP_BASEDIR=%CD%\tmp_bin
@@ -135,11 +141,8 @@ for %%v in (%DESIRED_PYTHON_PREFIX%) do (
     :: Set Flags
     if not "%CUDA_VERSION%"=="cpu" (
         set MAGMA_HOME=%cd%\magma_%CUDA_PREFIX%_%BUILD_TYPE%
-        set CUDNN_VERSION=7
     )
     call %CUDA_PREFIX%.bat
-    if ERRORLEVEL 1 exit /b 1
-    if "%BUILD_PYTHONLESS%" == "" call internal\test.bat
     if ERRORLEVEL 1 exit /b 1
     @endlocal
 )

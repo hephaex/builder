@@ -65,6 +65,12 @@ if [[ -n "$OVERRIDE_PACKAGE_VERSION" ]]; then
     build_version="$OVERRIDE_PACKAGE_VERSION"
     build_number=0
 fi
+
+# differentiate package name for cross compilation to avoid collision
+if [[ -n "$CROSS_COMPILE_ARM64" ]]; then
+    build_version="$build_version.arm64"
+fi
+
 export PYTORCH_BUILD_VERSION=$build_version
 export PYTORCH_BUILD_NUMBER=$build_number
 
@@ -125,6 +131,15 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # through gloo). This dependency is made available through meta.yaml, so
     # we can override the default and set USE_DISTRIBUTED=1.
     export USE_DISTRIBUTED=1
+
+    # testing cross compilation
+    if [[ -n "$CROSS_COMPILE_ARM64" ]]; then
+        export CMAKE_OSX_ARCHITECTURES=arm64
+        export USE_MKLDNN=OFF
+        export USE_NNPACK=OFF
+        export USE_QNNPACK=OFF
+        export BUILD_TEST=OFF
+    fi
 fi
 
 echo "Will build for all Pythons: ${DESIRED_PYTHON[@]}"
@@ -167,7 +182,7 @@ if [[ ! -d "$pytorch_rootdir" ]]; then
     popd
 fi
 pushd "$pytorch_rootdir"
-git submodule update --init --recursive
+git submodule update --init --recursive --jobs 0
 echo "Using Pytorch from "
 git --no-pager log --max-count 1
 popd
@@ -184,6 +199,8 @@ if [[ "$(uname)" == 'Darwin' ]]; then
         rm "$miniconda_sh"
     export PATH="$tmp_conda/bin:$PATH"
     retry conda install -yq conda-build
+    # Install py-lief=0.12.0 containing https://github.com/lief-project/LIEF/pull/579 to speed up the builds
+    retry conda install -yq  py-lief==0.12.0 -c malfet
 elif [[ "$OSTYPE" == "msys" ]]; then
     export tmp_conda="${WIN_PACKAGE_WORK_DIR}\\conda"
     export miniconda_exe="${WIN_PACKAGE_WORK_DIR}\\miniconda.exe"
@@ -242,8 +259,16 @@ else
     . ./switch_cuda_version.sh "$desired_cuda"
     # TODO, simplify after anaconda fixes their cudatoolkit versioning inconsistency.
     # see: https://github.com/conda-forge/conda-forge.github.io/issues/687#issuecomment-460086164
-    if [[ "$desired_cuda" == "11.0" ]]; then
-        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=11.0,<11.1 # [not osx]"
+    if [[ "$desired_cuda" == "11.2" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=11.2,<11.3 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda112 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "11.1" ]]; then
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=11.1,<11.2 # [not osx]"
+        export MAGMA_PACKAGE="    - magma-cuda111 # [not osx and not win]"
+    elif [[ "$desired_cuda" == "11.0" ]]; then
+        # cudatoolkit == 11.0.221 is bugged and gives a libcublas error
+        # see: https://github.com/pytorch/pytorch/issues/51080
+        export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=11.0,<11.0.221 # [not osx]"
         export MAGMA_PACKAGE="    - magma-cuda110 # [not osx and not win]"
     elif [[ "$desired_cuda" == "10.2" ]]; then
         export CONDA_CUDATOOLKIT_CONSTRAINT="    - cudatoolkit >=10.2,<10.3 # [not osx]"
@@ -288,6 +313,11 @@ else
     export CONDA_BUILD_EXTRA_ARGS=""
 fi
 
+# Build PyTorch with Gloo's TCP_TLS transport
+if [[ "$(uname)" == 'Linux' ]]; then
+    export USE_GLOO_WITH_OPENSSL=1
+fi
+
 # Loop through all Python versions to build a package for each
 for py_ver in "${DESIRED_PYTHON[@]}"; do
     build_string="py${py_ver}_${build_string_suffix}"
@@ -320,13 +350,19 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
     # Build the package
     echo "Build $build_folder for Python version $py_ver"
     conda config --set anaconda_upload no
+    # There was a bug that was introduced in conda-package-handling >= 1.6.1 that makes archives
+    # above a certain size fail out when attempting to extract
+    # see: https://github.com/conda/conda-package-handling/issues/71
+    conda install -y "conda-package-handling=1.6.0"
+
+    ADDITIONAL_CHANNELS=""
     echo "Calling conda-build at $(date)"
     time CMAKE_ARGS=${CMAKE_ARGS[@]} \
          EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
          PYTORCH_GITHUB_ROOT_DIR="$pytorch_rootdir" \
          PYTORCH_BUILD_STRING="$build_string" \
          PYTORCH_MAGMA_CUDA_VERSION="$cuda_nodot" \
-         conda build -c "$ANACONDA_USER" \
+         conda build -c "$ANACONDA_USER" ${ADDITIONAL_CHANNELS} \
                      --no-anaconda-upload \
                      --python "$py_ver" \
                      --output-folder "$output_folder" \
@@ -343,6 +379,11 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
     # Extract the package for testing
     ls -lah "$output_folder"
     built_package="$(find $output_folder/ -name '*pytorch*.tar.bz2')"
+    # Set correct platform for cross compiled package
+    if [[ -n "$CROSS_COMPILE_ARM64" ]]; then
+      conda convert "$built_package" -p osx-arm64 -f --output-dir "$output_folder"
+      built_package="$(find $output_folder/osx-arm64 -name '*pytorch*.tar.bz2')"
+    fi
 
     # Copy the built package to the host machine for persistence before testing
     if [[ -n "$PYTORCH_FINAL_PACKAGE_DIR" ]]; then
@@ -350,18 +391,20 @@ for py_ver in "${DESIRED_PYTHON[@]}"; do
         cp "$built_package" "$PYTORCH_FINAL_PACKAGE_DIR/"
     fi
 
-    conda install -y "$built_package"
+    # Install the built package and run tests, unless it's for mac cross compiled arm64
+    if [[ -z "$CROSS_COMPILE_ARM64" ]]; then
+        conda install -y "$built_package"
 
-    # Run tests
-    echo "$(date) :: Running tests"
-    pushd "$pytorch_rootdir"
-    if [[ "$cpu_only" == 1 ]]; then
-        "${SOURCE_DIR}/../run_tests.sh" 'conda' "$py_ver" 'cpu'
-    else
-        "${SOURCE_DIR}/../run_tests.sh" 'conda' "$py_ver" "cu$cuda_nodot"
+        echo "$(date) :: Running tests"
+        pushd "$pytorch_rootdir"
+        if [[ "$cpu_only" == 1 ]]; then
+            "${SOURCE_DIR}/../run_tests.sh" 'conda' "$py_ver" 'cpu'
+        else
+            "${SOURCE_DIR}/../run_tests.sh" 'conda' "$py_ver" "cu$cuda_nodot"
+        fi
+        popd
+        echo "$(date) :: Finished tests"
     fi
-    popd
-    echo "$(date) :: Finished tests"
 
     # Clean up test folder
     source deactivate

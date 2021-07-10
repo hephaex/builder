@@ -23,6 +23,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+conda/out*/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -77,3 +78,11 @@ node_modules
 
 # mypy
 **/.mypy_cache/
+
+# Mac directory meta
+.DS_Store
+*/**/.DS_Store
+
+# Analytics cache folder
+cache/
+.vscode/

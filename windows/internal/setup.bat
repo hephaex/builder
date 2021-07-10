@@ -66,6 +66,7 @@ move /Y torch\test\*.* libtorch\test\
 
 move /Y libtorch\bin\*.dll libtorch\lib\
 
+echo "%PYTORCH_BUILD_VERSION%" > libtorch\build-version
 git rev-parse HEAD > libtorch\build-hash
 
 IF "%DEBUG%" == "" (
@@ -74,7 +75,13 @@ IF "%DEBUG%" == "" (
     set LIBTORCH_PREFIX=libtorch-win-%VARIANT%-debug
 )
 
+:: remove files to save space.
+rmdir /s /q "C:/Program Files/NVIDIA GPU Computing Toolkit/"
+rmdir /s /q "C:/Program Files (x86)/Microsoft Visual Studio/"
+
 7z a -tzip "%LIBTORCH_PREFIX%-%PYTORCH_BUILD_VERSION%.zip" libtorch\*
+:: Cleanup raw data to save space
+rmdir /s /q libtorch
 
 if not exist ..\output mkdir ..\output
 copy /Y "%LIBTORCH_PREFIX%-%PYTORCH_BUILD_VERSION%.zip" "%PYTORCH_FINAL_PACKAGE_DIR%\"
@@ -83,8 +90,7 @@ copy /Y "%LIBTORCH_PREFIX%-%PYTORCH_BUILD_VERSION%.zip" "%PYTORCH_FINAL_PACKAGE_
 goto build_end
 
 :pytorch
-:: This stores in e.g. D:/_work/1/s/windows/output/cpu
-pip wheel -vvv -e . --no-deps --wheel-dir "%PYTORCH_FINAL_PACKAGE_DIR%"
+python setup.py bdist_wheel -d "%PYTORCH_FINAL_PACKAGE_DIR%"
 
 :build_end
 IF ERRORLEVEL 1 exit /b 1

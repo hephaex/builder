@@ -31,7 +31,7 @@ else
   install_root="$(dirname $(which python))/../lib/python${py_dot}/site-packages/torch/"
 fi
 
-if [[ "$DESIRED_CUDA" != 'cpu' ]]; then
+if [[ "$DESIRED_CUDA" != 'cpu' && "$DESIRED_CUDA" != *"rocm"* ]]; then
   # cu90, cu92, cu100, cu101
   if [[ ${#DESIRED_CUDA} -eq 4 ]]; then
     CUDA_VERSION="${DESIRED_CUDA:2:1}.${DESIRED_CUDA:3:1}"
@@ -230,13 +230,7 @@ else
   done
 fi
 
-TEST_CODE_DIR="$(dirname ${BASH_SOURCE[0]})/test_example_code"
-build_and_run_example_cpp () {
-  if [[ "$DESIRED_DEVTOOLSET" == *"cxx11-abi"* ]]; then
-    GLIBCXX_USE_CXX11_ABI=1
-  else
-    GLIBCXX_USE_CXX11_ABI=0
-  fi
+setup_link_flags () {
   REF_LIB="-Wl,-R${install_root}/lib"
   if [[ "$(uname)" == 'Darwin' ]]; then
     REF_LIB="-Wl,-rpath ${install_root}/lib"
@@ -256,7 +250,20 @@ build_and_run_example_cpp () {
   TORCH_CUDA_LINK_FLAGS=""
   if [ -f "${install_root}/lib/libtorch_cuda.so" ] || [ -f "${install_root}/lib/libtorch_cuda.dylib" ]; then
     TORCH_CUDA_LINK_FLAGS="-ltorch_cuda"
+  elif [ -f "${install_root}/lib/libtorch_cuda_cpp.so" ] && [ -f "${install_root}/lib/libtorch_cuda_cpp.so" ] || \
+    [ -f "${install_root}/lib/libtorch_cuda_cu.dylib" ] && [ -f "${install_root}/lib/libtorch_cuda_cu.dylib" ]; then
+    TORCH_CUDA_LINK_FLAGS="-ltorch_cuda_cpp -ltorch_cuda_cu"
   fi
+}
+
+TEST_CODE_DIR="$(dirname ${BASH_SOURCE[0]})/test_example_code"
+build_and_run_example_cpp () {
+  if [[ "$DESIRED_DEVTOOLSET" == *"cxx11-abi"* ]]; then
+    GLIBCXX_USE_CXX11_ABI=1
+  else
+    GLIBCXX_USE_CXX11_ABI=0
+  fi
+  setup_link_flags
   g++ ${TEST_CODE_DIR}/$1.cpp -I${install_root}/include -I${install_root}/include/torch/csrc/api/include -D_GLIBCXX_USE_CXX11_ABI=$GLIBCXX_USE_CXX11_ABI -std=gnu++14 -L${install_root}/lib ${REF_LIB} ${ADDITIONAL_LINKER_FLAGS} -ltorch $TORCH_CPU_LINK_FLAGS $TORCH_CUDA_LINK_FLAGS $C10_LINK_FLAGS -o $1
   ./$1
 }
@@ -268,26 +275,7 @@ build_example_cpp_with_incorrect_abi () {
     GLIBCXX_USE_CXX11_ABI=1
   fi
   set +e
-  REF_LIB="-Wl,-R${install_root}/lib"
-  if [[ "$(uname)" == 'Darwin' ]]; then
-    REF_LIB="-Wl,-rpath ${install_root}/lib"
-  fi
-  ADDITIONAL_LINKER_FLAGS=""
-  if [[ "$(uname)" == 'Linux' ]]; then
-    ADDITIONAL_LINKER_FLAGS="-Wl,--no-as-needed"
-  fi
-  C10_LINK_FLAGS=""
-  if [ -f "${install_root}/lib/libc10.so" ] || [ -f "${install_root}/lib/libc10.dylib" ]; then
-    C10_LINK_FLAGS="-lc10"
-  fi
-  TORCH_CPU_LINK_FLAGS=""
-  if [ -f "${install_root}/lib/libtorch_cpu.so" ] || [ -f "${install_root}/lib/libtorch_cpu.dylib" ]; then
-    TORCH_CPU_LINK_FLAGS="-ltorch_cpu"
-  fi
-  TORCH_CUDA_LINK_FLAGS=""
-  if [ -f "${install_root}/lib/libtorch_cuda.so" ] || [ -f "${install_root}/lib/libtorch_cuda.dylib" ]; then
-    TORCH_CUDA_LINK_FLAGS="-ltorch_cuda"
-  fi
+  setup_link_flags
   g++ ${TEST_CODE_DIR}/$1.cpp -I${install_root}/include -I${install_root}/include/torch/csrc/api/include -D_GLIBCXX_USE_CXX11_ABI=$GLIBCXX_USE_CXX11_ABI -std=gnu++14 -L${install_root}/lib ${REF_LIB} ${ADDITIONAL_LINKER_FLAGS} -ltorch $TORCH_CPU_LINK_FLAGS $TORCH_CUDA_LINK_FLAGS $C10_LINK_FLAGS -o $1
   ERRCODE=$?
   set -e
@@ -347,7 +335,7 @@ if [[ "$OSTYPE" == "msys" ]]; then
 fi
 
 # Test that CUDA builds are setup correctly
-if [[ "$DESIRED_CUDA" != 'cpu' ]]; then
+if [[ "$DESIRED_CUDA" != 'cpu' && "$DESIRED_CUDA" != *"rocm"* ]]; then
   if [[ "$PACKAGE_TYPE" == 'libtorch' ]]; then
     build_and_run_example_cpp check-torch-cuda
   else
@@ -362,6 +350,36 @@ if [[ "$DESIRED_CUDA" != 'cpu' ]]; then
 
     echo "Checking that CuDNN is available"
     python -c 'import torch; exit(0 if torch.backends.cudnn.is_available() else 1)'
+
+    # Validates builds is free of linker regressions reported in https://github.com/pytorch/pytorch/issues/57744
+    echo "Checking that exception handling works"
+    python -c "import torch; from unittest import TestCase;TestCase().assertRaises(RuntimeError, lambda:torch.eye(7, 7, device='cuda:7'))"
+
+    echo "Checking that basic RNN works"
+    python ${TEST_CODE_DIR}/rnn_smoke.py
+
+    echo "Checking that basic CNN works"
+    python ${TEST_CODE_DIR}/cnn_smoke.py
+
     popd
   fi # if libtorch
 fi # if cuda
+
+###############################################################################
+# Check PyTorch supports TCP_TLS gloo transport
+###############################################################################
+
+if [[ "$(uname)" == 'Linux' && "$PACKAGE_TYPE" != 'libtorch' ]]; then
+  GLOO_CHECK="import torch.distributed as dist
+try:
+    dist.init_process_group('gloo', rank=0, world_size=1)
+except RuntimeError as e:
+    print(e)
+"
+  RESULT=`GLOO_DEVICE_TRANSPORT=TCP_TLS MASTER_ADDR=localhost MASTER_PORT=63945 python -c "$GLOO_CHECK"`
+  GLOO_TRANSPORT_IS_NOT_SUPPORTED='gloo transport is not supported'
+  if [[ "$RESULT" =~ "$GLOO_TRANSPORT_IS_NOT_SUPPORTED" ]]; then
+    echo "PyTorch doesn't support TLS_TCP transport, please build with USE_GLOO_WITH_OPENSSL=1"
+    exit 1
+  fi
+fi

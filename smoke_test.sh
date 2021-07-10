@@ -94,10 +94,21 @@ fi
 if [[ "$PACKAGE_TYPE" == 'conda' || "$(uname)" == 'Darwin' ]]; then
   # Create a new conda env in conda, or on MacOS
   conda create -yn test python="$py_dot" && source activate test
-  retry conda install -yq future numpy protobuf six requests
+  python_version=$(python --version 2>&1)
+  dependencies="numpy protobuf six requests"
+  case ${python_version} in
+    *3.6.*)
+      dependencies="${dependencies} future dataclasses"
+      ;;
+  esac
+  conda install -yq ${dependencies}
 else
   export PATH=/opt/python/${py_long}/bin:$PATH
-  retry pip install -q future numpy protobuf six requests
+  if [[ "$(python --version 2>&1)" == *3.6.* ]]; then
+    retry pip install -q future numpy protobuf six requests dataclasses
+  else
+    retry pip install -q future numpy protobuf six requests
+  fi
 fi
 
 # Switch to the desired CUDA if using the conda-cuda Docker image
@@ -122,6 +133,13 @@ which python
 #  retry curl "https://download.pytorch.org/whl/nightly/$DESIRED_CUDA/torch_nightly.html" -v
 #fi
 
+# CUDA Toolkit 11.1 and 11.2 are both in nvidia
+if [[ "$DESIRED_CUDA" == cu111 || "$DESIRED_CUDA" == cu112 ]]; then
+  EXTRA_CONDA_FLAGS="-c=nvidia"
+elif
+  EXTRA_CONDA_FLAGS=""
+fi
+
 # Install the package for the requested date
 if [[ "$PACKAGE_TYPE" == 'libtorch' ]]; then
   mkdir tmp_libtorch
@@ -138,7 +156,7 @@ elif [[ "$PACKAGE_TYPE" == 'conda' ]]; then
 	    retry conda install -yq -c pytorch-nightly "$package_name_and_version" cpuonly
 	fi
   else
-    retry conda install -yq -c pytorch-nightly "cudatoolkit=$CUDA_VERSION_SHORT" "$package_name_and_version"
+    retry conda install -yq ${EXTRA_CONDA_FLAGS} -c pytorch-nightly "cudatoolkit=$CUDA_VERSION_SHORT" "$package_name_and_version"
   fi
 else
   # We need to upgrade pip now that we have '+cuver' in the package name, as

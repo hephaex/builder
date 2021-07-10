@@ -2,6 +2,8 @@
 
 set -ex
 
+SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P ))"
+
 export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 export NCCL_ROOT_DIR=/usr/local/cuda
 export TH_BINARY_BUILD=1
@@ -27,11 +29,16 @@ fi
 # because in some cases a single Docker image can have multiple CUDA versions
 # on it, and `nvcc --version` might not show the CUDA version we want.
 if [[ -n "$DESIRED_CUDA" ]]; then
-    # cu90, cu92, cu100, cu101
-    if [[ ${#DESIRED_CUDA} -eq 4 ]]; then
-        CUDA_VERSION="${DESIRED_CUDA:2:1}.${DESIRED_CUDA:3:1}"
-    elif [[ ${#DESIRED_CUDA} -eq 5 ]]; then
-        CUDA_VERSION="${DESIRED_CUDA:2:2}.${DESIRED_CUDA:4:1}"
+    # If the DESIRED_CUDA already matches the format that we expect
+    if [[ ${DESIRED_CUDA} =~ ^[0-9]+\.[0-9]+$ ]]; then
+        CUDA_VERSION=${DESIRED_CUDA}
+    else
+        # cu90, cu92, cu100, cu101
+        if [[ ${#DESIRED_CUDA} -eq 4 ]]; then
+            CUDA_VERSION="${DESIRED_CUDA:2:1}.${DESIRED_CUDA:3:1}"
+        elif [[ ${#DESIRED_CUDA} -eq 5 ]]; then
+            CUDA_VERSION="${DESIRED_CUDA:2:2}.${DESIRED_CUDA:4:1}"
+        fi
     fi
     echo "Using CUDA $CUDA_VERSION as determined by DESIRED_CUDA"
 
@@ -42,31 +49,51 @@ if [[ -n "$DESIRED_CUDA" ]]; then
         /builder/conda/switch_cuda_version.sh "${DESIRED_CUDA}"
     fi
 else
-    CUDA_VERSION=$(nvcc --version|tail -n1|cut -f5 -d" "|cut -f1 -d",")
+    CUDA_VERSION=$(nvcc --version|grep release|cut -f5 -d" "|cut -f1 -d",")
     echo "CUDA $CUDA_VERSION Detected"
 fi
 
-export TORCH_CUDA_ARCH_LIST="3.7;5.0;6.0;7.0"
+cuda_version_nodot=$(echo $CUDA_VERSION | tr -d '.')
+
+TORCH_CUDA_ARCH_LIST="3.7;5.0;6.0;7.0"
 case ${CUDA_VERSION} in
-    11.*)
-        export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;7.5;8.0"
+    11.[123])
+        TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST};7.5;8.0;8.6"
+        EXTRA_CAFFE2_CMAKE_FLAGS+=("-DATEN_NO_TEST=ON")
+        ;;
+    11.0)
+        TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST};7.5;8.0"
         EXTRA_CAFFE2_CMAKE_FLAGS+=("-DATEN_NO_TEST=ON")
         ;;
     10.*)
-        export TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST;7.5"
+        TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
         EXTRA_CAFFE2_CMAKE_FLAGS+=("-DATEN_NO_TEST=ON")
         ;;
     9.*)
-        export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
+        TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}"
         ;;
     *)
         echo "unknown cuda version $CUDA_VERSION"
         exit 1
         ;;
 esac
-echo $TORCH_CUDA_ARCH_LIST
 
-cuda_version_nodot=$(echo $CUDA_VERSION | tr -d '.')
+if [[ -n "$OVERRIDE_TORCH_CUDA_ARCH_LIST" ]]; then
+    TORCH_CUDA_ARCH_LIST="$OVERRIDE_TORCH_CUDA_ARCH_LIST"
+
+    # Prune CUDA again with new arch list. Unfortunately, we need to re-install CUDA to prune it again
+    override_gencode=""
+    for arch in ${TORCH_CUDA_ARCH_LIST//;/ } ; do
+      arch_code=$(echo "$arch" | tr -d .)
+      override_gencode="${override_gencode}-gencode arch=compute_$arch_code,code=sm_$arch_code "
+    done
+
+    export OVERRIDE_GENCODE=$override_gencode
+    bash "$(dirname "$SCRIPTPATH")"/common/install_cuda.sh "${CUDA_VERSION}"
+fi
+
+export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+echo "${TORCH_CUDA_ARCH_LIST}"
 
 # Package directories
 WHEELHOUSE_DIR="wheelhouse$cuda_version_nodot"
@@ -183,6 +210,57 @@ DEPS_SONAME=(
     "libnvrtc-builtins.so"
     "libgomp.so.1"
 )
+elif [[ $CUDA_VERSION == "11.1" ]]; then
+DEPS_LIST=(
+    "/usr/local/cuda/lib64/libcudart.so.11.0"   # CUDA 11.1 uses libcudart11.0 for backwards compat
+    "/usr/local/cuda/lib64/libnvToolsExt.so.1"
+    "/usr/local/cuda/lib64/libnvrtc.so.11.1"
+    "/usr/local/cuda/lib64/libnvrtc-builtins.so.11.1" # CUDA 11.+ searches for versioned builtins library
+    "$LIBGOMP_PATH"
+)
+
+DEPS_SONAME=(
+    "libcudart.so.11.0"
+    "libnvToolsExt.so.1"
+    "libnvrtc.so.11.1"
+    "libnvrtc-builtins.so.11.1"
+    "libgomp.so.1"
+)
+elif [[ $CUDA_VERSION == "11.2" ]]; then
+DEPS_LIST=(
+    "/usr/local/cuda/lib64/libcudart.so.11.0"
+    "/usr/local/cuda/lib64/libnvToolsExt.so.1"
+    "/usr/local/cuda/lib64/libnvrtc.so.11.2"
+    "/usr/local/cuda/lib64/libnvrtc-builtins.so.11.2"
+    "$LIBGOMP_PATH"
+)
+
+DEPS_SONAME=(
+    "libcudart.so.11.0"
+    "libnvToolsExt.so.1"
+    "libnvrtc.so.11.2"
+    "libnvrtc-builtins.so.11.2"
+    "libgomp.so.1"
+)
+elif [[ $CUDA_VERSION == "11.3" ]]; then
+DEPS_LIST=(
+    "/usr/local/cuda/lib64/libcudart.so.11.0"
+    "/usr/local/cuda/lib64/libnvToolsExt.so.1"
+    "/usr/local/cuda/lib64/libnvrtc.so.11.2"    # this is not a mistake for 11.3, it links to 11.3.58
+    "/usr/local/cuda/lib64/libnvrtc-builtins.so.11.3"
+    "$LIBGOMP_PATH"
+)
+
+DEPS_SONAME=(
+    "libcudart.so.11.0"
+    "libnvToolsExt.so.1"
+    "libnvrtc.so.11.2"
+    "libnvrtc-builtins.so.11.3"
+    "libgomp.so.1"
+)
+
+# Try parallelizing nvcc as well
+export TORCH_NVCC_FLAGS="-Xfatbin -compress-all --threads 2"
 else
     echo "Unknown cuda version $CUDA_VERSION"
     exit 1

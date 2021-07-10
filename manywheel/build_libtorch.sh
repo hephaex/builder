@@ -50,6 +50,11 @@ export PYTORCH_BUILD_NUMBER=$build_number
 export CMAKE_LIBRARY_PATH="/opt/intel/lib:/lib:$CMAKE_LIBRARY_PATH"
 export CMAKE_INCLUDE_PATH="/opt/intel/include:$CMAKE_INCLUDE_PATH"
 
+# set OPENSSL_ROOT_DIR=/opt/openssl if it exists
+if [[ -e /opt/openssl ]]; then
+    export OPENSSL_ROOT_DIR=/opt/openssl
+    export CMAKE_INCLUDE_PATH="/opt/openssl/include":$CMAKE_INCLUDE_PATH
+fi
 
 # If given a python version like 3.6m or 2.7mu, convert this to the format we
 # expect. The binary CI jobs pass in python versions like this; they also only
@@ -81,7 +86,7 @@ else
     pushd $pytorch_rootdir
 fi
 pushd $pytorch_rootdir
-git submodule update --init --recursive
+git submodule update --init --recursive --jobs 0
 
 export PATCHELF_BIN=/usr/local/bin/patchelf
 patchelf_version=`$PATCHELF_BIN --version`
@@ -110,6 +115,11 @@ else
     export _GLIBCXX_USE_CXX11_ABI=0
 fi
 
+if [[ "$DESIRED_CUDA" == *"rocm"* ]]; then
+    echo "Calling build_amd.py at $(date)"
+    python tools/amd_build/build_amd.py
+fi
+
 echo "Calling setup.py install at $(date)"
 
 if [[ $LIBTORCH_VARIANT = *"static"* ]]; then
@@ -123,9 +133,16 @@ fi
 
     time CMAKE_ARGS=${CMAKE_ARGS[@]} \
         EXTRA_CAFFE2_CMAKE_FLAGS="${EXTRA_CAFFE2_CMAKE_FLAGS[@]} $STATIC_CMAKE_FLAG" \
+        # TODO: Remove this flag once https://github.com/pytorch/pytorch/issues/55952 is closed
+        CFLAGS='-Wno-deprecated-declarations' \
+        BUILD_LIBTORCH_CPU_WITH_DEBUG=1 \
         python setup.py install
 
     mkdir -p libtorch/{lib,bin,include,share}
+
+    # Make debug folder separate so it doesn't get zipped up with the rest of
+    # libtorch
+    mkdir debug
 
     # Copy over all lib files
     cp -rv build/lib/*                libtorch/lib/
@@ -137,6 +154,27 @@ fi
 
     # Copy over all of the cmake files
     cp -rv build/lib*/torch/share/*   libtorch/share/
+
+    # Split libtorch into debug / release version
+    cp libtorch/lib/libtorch_cpu.so libtorch/lib/libtorch_cpu.so.dbg
+
+    # Keep debug symbols on debug lib
+    strip --only-keep-debug libtorch/lib/libtorch_cpu.so.dbg
+
+    # Remove debug info from release lib
+    strip --strip-debug libtorch/lib/libtorch_cpu.so
+
+    # Add a debug link to the release lib to the debug lib (debuggers will then
+    # search for symbols in a file called libtorch_cpu.so.dbg in some
+    # predetermined locations) and embed a CRC32 of the debug library into the .so
+    cd libtorch/lib
+
+    objcopy libtorch_cpu.so --add-gnu-debuglink=libtorch_cpu.so.dbg
+    cd ../..
+
+    # Move the debug symbols to its own directory so it doesn't get processed /
+    # zipped with all the other libraries
+    mv libtorch/lib/libtorch_cpu.so.dbg debug/libtorch_cpu.so.dbg
 
     echo "${PYTORCH_BUILD_VERSION}" > libtorch/build-version
     echo "$(pushd $pytorch_rootdir && git rev-parse HEAD)" > libtorch/build-hash
@@ -153,6 +191,14 @@ fi
     set -x
 
     mkdir -p /tmp/$LIBTORCH_HOUSE_DIR
+
+    # objcopy installs a CRC32 into libtorch_cpu above so, so add that to the name here
+    CRC32=$(objcopy --dump-section .gnu_debuglink=>(tail -c4 | od -t x4 -An | xargs echo) libtorch/lib/libtorch_cpu.so)
+
+    # Zip debug symbols
+    zip /tmp/$LIBTORCH_HOUSE_DIR/debug-libtorch-$LIBTORCH_ABI$LIBTORCH_VARIANT-$PYTORCH_BUILD_VERSION-$CRC32.zip debug/libtorch_cpu.so.dbg
+
+    # Zip and copy libtorch
     zip -rq /tmp/$LIBTORCH_HOUSE_DIR/libtorch-$LIBTORCH_ABI$LIBTORCH_VARIANT-$PYTORCH_BUILD_VERSION.zip libtorch
     cp /tmp/$LIBTORCH_HOUSE_DIR/libtorch-$LIBTORCH_ABI$LIBTORCH_VARIANT-$PYTORCH_BUILD_VERSION.zip \
        /tmp/$LIBTORCH_HOUSE_DIR/libtorch-$LIBTORCH_ABI$LIBTORCH_VARIANT-latest.zip
@@ -298,4 +344,5 @@ done
 # Copy wheels to host machine for persistence before testing
 if [[ -n "$PYTORCH_FINAL_PACKAGE_DIR" ]]; then
     cp /$LIBTORCH_HOUSE_DIR/libtorch*.zip "$PYTORCH_FINAL_PACKAGE_DIR"
+    cp /$LIBTORCH_HOUSE_DIR/debug-libtorch*.zip "$PYTORCH_FINAL_PACKAGE_DIR"
 fi
